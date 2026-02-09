@@ -159,7 +159,7 @@ pub enum Modifier {
 // ─── Sigma String ────────────────────────────────────────────────────────────
 
 /// A part of a Sigma string value.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SigmaStringPart {
     /// A literal string segment.
     Literal(String),
@@ -172,7 +172,7 @@ pub enum SigmaStringPart {
 }
 
 /// A Sigma string that may contain literals, wildcards, and placeholders.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SigmaString {
     pub parts: Vec<SigmaStringPart>,
 }
@@ -230,7 +230,7 @@ impl From<&str> for SigmaString {
 // ─── Detection Values ────────────────────────────────────────────────────────
 
 /// A typed value that can appear in a Sigma detection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SigmaValue {
     String(SigmaString),
     Int(i64),
