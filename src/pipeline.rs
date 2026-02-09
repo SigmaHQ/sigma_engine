@@ -345,6 +345,8 @@ impl ProcessingItem {
         for value in values {
             if let SigmaValue::String(sigma_str) = value {
                 // For simple strings, apply regex replacement
+                // Complex strings with wildcards/placeholders are intentionally skipped
+                // as they need special handling based on backend requirements
                 if let Some(plain) = sigma_str.as_plain() {
                     let replaced = re.replace_all(plain, replacement);
                     if replaced != plain {
@@ -388,6 +390,8 @@ impl ProcessingItem {
     fn map_string_values(&self, values: &mut Vec<SigmaValue>, mapping: &HashMap<String, Vec<String>>) {
         for value in values {
             if let SigmaValue::String(sigma_str) = value {
+                // Only map simple string values
+                // Complex strings with wildcards/placeholders are intentionally skipped
                 if let Some(plain) = sigma_str.as_plain() {
                     if let Some(new_values) = mapping.get(plain) {
                         if let Some(new_value) = new_values.first() {
