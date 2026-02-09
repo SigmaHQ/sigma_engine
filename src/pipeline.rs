@@ -9,18 +9,49 @@
 //! ```rust
 //! use sigma_engine::{SigmaCollection, ProcessingPipeline};
 //!
-//! let yaml = r#"
-//! name: Example Pipeline
+//! // Define a pipeline that adapts Windows rules for Splunk
+//! let pipeline_yaml = r#"
+//! name: Splunk Windows Pipeline
 //! priority: 10
 //! transformations:
 //!   - id: field_mapping
 //!     type: field_name_mapping
 //!     mapping:
 //!       EventID:
-//!         - event_id
+//!         - EventCode
+//!   - id: add_index
+//!     type: add_condition
+//!     conditions:
+//!       index: "windows"
+//!     rule_conditions:
+//!       - type: logsource_product
+//!         product: windows
 //! "#;
 //!
-//! let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+//! let pipeline = ProcessingPipeline::from_yaml(pipeline_yaml).unwrap();
+//!
+//! // Parse a Sigma rule
+//! let rule_yaml = r#"
+//! title: Suspicious Process
+//! logsource:
+//!     product: windows
+//!     category: process_creation
+//! detection:
+//!     selection:
+//!         EventID: 4688
+//!         CommandLine: '*powershell*'
+//!     condition: selection
+//! "#;
+//!
+//! let mut collection = SigmaCollection::from_yaml(rule_yaml).unwrap();
+//! if let sigma_engine::SigmaDocument::Rule(ref mut rule) = collection.documents[0] {
+//!     // Apply pipeline transformations
+//!     pipeline.apply(rule).unwrap();
+//!     
+//!     // The rule is now transformed for Splunk:
+//!     // - EventID is mapped to EventCode
+//!     // - index: "windows" condition is added
+//! }
 //! ```
 
 use std::collections::HashMap;
