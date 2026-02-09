@@ -3,6 +3,50 @@
 //! This module provides functionality to compile Sigma rules into matcher objects
 //! that can efficiently match events. Matchers are thread-safe and can be used
 //! concurrently.
+//!
+//! # Example
+//!
+//! ```rust
+//! use sigma_engine::{SigmaCollection, SigmaDocument, SigmaRuleMatcher};
+//! use std::collections::HashMap;
+//!
+//! let yaml = r#"
+//! title: Suspicious Process
+//! logsource:
+//!     product: windows
+//! detection:
+//!     selection:
+//!         Image|endswith: '\cmd.exe'
+//!     condition: selection
+//! "#;
+//!
+//! let collection = SigmaCollection::from_yaml(yaml).unwrap();
+//! let rule = match &collection.documents[0] {
+//!     SigmaDocument::Rule(r) => r.clone(),
+//!     _ => panic!("Expected rule"),
+//! };
+//!
+//! let matcher = SigmaRuleMatcher::new(rule).unwrap();
+//!
+//! let mut event = HashMap::new();
+//! event.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+//!
+//! assert!(matcher.matches(&event));
+//! ```
+//!
+//! # Supported Modifiers
+//!
+//! The matcher supports all Sigma modifiers including:
+//! - String modifiers: `contains`, `startswith`, `endswith`, `re` (regex)
+//! - Case modifiers: `cased`
+//! - Encoding modifiers: `base64`, `utf16le`, `utf16be`, `utf16`, `wide`
+//! - Logic modifiers: `all`, `exists`, `neq`
+//! - Numeric modifiers: `lt`, `lte`, `gt`, `gte`
+//!
+//! # Thread Safety
+//!
+//! `SigmaRuleMatcher` is thread-safe and uses `Arc` internally for efficient sharing
+//! across threads.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -669,5 +713,289 @@ detection:
         event2.insert("EventID".to_string(), "4688".to_string());
         event2.insert("Image".to_string(), "C:\\Windows\\System32\\svchost.exe".to_string());
         assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_or_values() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        Image:
+            - 'C:\Windows\System32\cmd.exe'
+            - 'C:\Windows\System32\powershell.exe'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Image".to_string(), "C:\\Windows\\System32\\powershell.exe".to_string());
+        assert!(matcher.matches(&event2));
+
+        let mut event3 = HashMap::new();
+        event3.insert("Image".to_string(), "C:\\Windows\\System32\\notepad.exe".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_all_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|contains|all:
+            - '-enc'
+            - '-nop'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("CommandLine".to_string(), "powershell.exe -enc abc123 -nop".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("CommandLine".to_string(), "powershell.exe -enc abc123".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_exists() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        EventID: 4738
+        PasswordLastSet|exists: true
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4738".to_string());
+        event1.insert("PasswordLastSet".to_string(), "some_value".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4738".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_startswith() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        Image|startswith: 'C:\Windows\'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Image".to_string(), "C:\\Program Files\\app.exe".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_case_sensitivity() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        User|cased: 'SYSTEM'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("User".to_string(), "SYSTEM".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("User".to_string(), "system".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_one_of_them() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    sel1:
+        EventID: 4688
+    sel2:
+        EventID: 4689
+    condition: 1 of them
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4688".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4689".to_string());
+        assert!(matcher.matches(&event2));
+
+        let mut event3 = HashMap::new();
+        event3.insert("EventID".to_string(), "1234".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_one_of_pattern() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection_cmd:
+        Image|endswith: '\cmd.exe'
+    selection_powershell:
+        Image|endswith: '\powershell.exe'
+    filter_sys:
+        User: SYSTEM
+    condition: 1 of selection* and not filter_sys
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+        event1.insert("User".to_string(), "admin".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Image".to_string(), "C:\\Windows\\System32\\powershell.exe".to_string());
+        event2.insert("User".to_string(), "admin".to_string());
+        assert!(matcher.matches(&event2));
+
+        let mut event3 = HashMap::new();
+        event3.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+        event3.insert("User".to_string(), "SYSTEM".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_wildcard() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        Image: '*\cmd.exe'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Image".to_string(), "C:\\temp\\cmd.exe".to_string());
+        assert!(matcher.matches(&event2));
+
+        // This should NOT match because there's no backslash before cmd.exe
+        let mut event3 = HashMap::new();
+        event3.insert("Image".to_string(), "cmd.exe".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_wildcard_any() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        Image: '*cmd.exe'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Image".to_string(), "cmd.exe".to_string());
+        assert!(matcher.matches(&event2));
     }
 }

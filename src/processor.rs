@@ -2,6 +2,67 @@
 //!
 //! This module provides the LogProcessor which ingests log events in various formats
 //! and matches them against compiled Sigma rules using multiple threads.
+//!
+//! # Example
+//!
+//! ```rust
+//! use sigma_engine::{SigmaCollection, SigmaDocument, LogProcessor, LogEvent, LogSource};
+//! use std::collections::HashMap;
+//!
+//! let yaml = r#"
+//! title: Process Creation
+//! logsource:
+//!     product: windows
+//!     category: process_creation
+//! detection:
+//!     selection:
+//!         EventID: 4688
+//!     condition: selection
+//! "#;
+//!
+//! let collection = SigmaCollection::from_yaml(yaml).unwrap();
+//! let rule = match &collection.documents[0] {
+//!     SigmaDocument::Rule(r) => r.clone(),
+//!     _ => panic!("Expected rule"),
+//! };
+//!
+//! // Create processor
+//! let processor = LogProcessor::new(vec![rule]).unwrap();
+//!
+//! // Start processing
+//! let (event_tx, detection_rx) = processor.start();
+//!
+//! // Send events
+//! let log_source = LogSource {
+//!     category: Some("process_creation".to_string()),
+//!     product: Some("windows".to_string()),
+//!     service: None,
+//!     custom: HashMap::new(),
+//! };
+//!
+//! let json = r#"{"EventID": 4688, "Image": "cmd.exe"}"#;
+//! let event = LogEvent::from_json(log_source, json).unwrap();
+//! event_tx.send(event).unwrap();
+//! drop(event_tx);
+//!
+//! // Receive detections
+//! while let Ok(detection) = detection_rx.recv() {
+//!     println!("Matched: {}", detection.rule.title);
+//! }
+//! ```
+//!
+//! # Supported Input Formats
+//!
+//! The LogProcessor supports multiple input formats:
+//! - **JSON**: Structured JSON objects with field-value pairs
+//! - **Plain text**: Unstructured log strings
+//! - **Field="Value"**: Key-value pairs in Field="Value" format
+//!
+//! # Threading Model
+//!
+//! By default, the processor uses (CPU count - 1) worker threads. Each worker
+//! processes events from a shared channel and outputs detections to another channel.
+//! This allows for efficient parallel processing of high-volume log streams.
 
 use std::collections::HashMap;
 use std::sync::Arc;
