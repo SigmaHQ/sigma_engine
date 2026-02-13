@@ -450,34 +450,13 @@ impl ProcessingItem {
                 match search_id {
                     SearchIdentifier::Map(items) => {
                         for item in items {
-                            if let Some(field) = &item.field {
-                                // Check each prefix in mapping
-                                for (src_prefix, dest_prefixes) in mapping {
-                                    if field.starts_with(src_prefix) {
-                                        let suffix = &field[src_prefix.len()..];
-                                        if let Some(dest_prefix) = dest_prefixes.first() {
-                                            item.field = Some(format!("{}{}", dest_prefix, suffix));
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                            Self::apply_prefix_mapping_to_item(item, mapping);
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
                         for items in maps {
                             for item in items {
-                                if let Some(field) = &item.field {
-                                    for (src_prefix, dest_prefixes) in mapping {
-                                        if field.starts_with(src_prefix) {
-                                            let suffix = &field[src_prefix.len()..];
-                                            if let Some(dest_prefix) = dest_prefixes.first() {
-                                                item.field = Some(format!("{}{}", dest_prefix, suffix));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
+                                Self::apply_prefix_mapping_to_item(item, mapping);
                             }
                         }
                     }
@@ -485,6 +464,22 @@ impl ProcessingItem {
             }
         }
         Ok(())
+    }
+    
+    /// Helper function to apply prefix mapping to a single detection item
+    fn apply_prefix_mapping_to_item(item: &mut DetectionItem, mapping: &HashMap<String, Vec<String>>) {
+        if let Some(field) = &item.field {
+            // Check each prefix in mapping
+            for (src_prefix, dest_prefixes) in mapping {
+                if field.starts_with(src_prefix) {
+                    let suffix = &field[src_prefix.len()..];
+                    if let Some(dest_prefix) = dest_prefixes.first() {
+                        item.field = Some(format!("{}{}", dest_prefix, suffix));
+                        break;
+                    }
+                }
+            }
+        }
     }
     
     fn apply_set_field(&self, rule: &mut SigmaRule) -> Result<()> {
@@ -495,8 +490,10 @@ impl ProcessingItem {
     }
     
     fn apply_regex(&self, rule: &mut SigmaRule) -> Result<()> {
-        // For now, regex is similar to replace_string
-        // In pySigma, it has additional options, but basic functionality is the same
+        // Temporary implementation: delegates to replace_string for basic functionality
+        // TODO: Full pySigma regex transformation includes additional options for
+        // skip_special, interpret_special, and other regex-specific behaviors
+        // that need to be implemented separately for complete compatibility
         self.apply_replace_string(rule)
     }
     
@@ -533,9 +530,11 @@ impl ProcessingItem {
     }
     
     fn apply_set_state(&self, _rule: &mut SigmaRule) -> Result<()> {
-        // State management would require a state store in the pipeline
-        // For now, this is a no-op placeholder
-        // In a full implementation, this would set state that can be used by other transformations
+        // State management placeholder - not yet implemented
+        // TODO: Full implementation requires a state store in the pipeline context
+        // that can persist state across transformations and be queried by other transformations.
+        // Currently, set_state transformations in pipelines will be silently ignored.
+        // Consider implementing a pipeline context with state storage for full compatibility.
         Ok(())
     }
 }
