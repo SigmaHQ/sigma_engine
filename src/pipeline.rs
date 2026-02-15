@@ -1741,8 +1741,12 @@ name: Test Pipeline
 vars:
   SystemRoot:
     - "C:\\Windows"
+    - "D:\\Windows"
+    - "E:\\WinNT"
   Admins:
     - Administrator
+    - root
+    - admin
 transformations:
   - id: replace_some
     type: value_placeholders
@@ -1756,17 +1760,28 @@ transformations:
         
         let selection = &rule.detection.search_identifiers["selection"];
         if let SearchIdentifier::Map(items) = selection {
-            // Image: %SystemRoot%\cmd.exe -> C:\Windows\cmd.exe (handled)
-            assert_eq!(items[0].values.len(), 1);
+            // Image: %SystemRoot%\cmd.exe -> 3 values (included placeholder expanded)
+            assert_eq!(items[0].values.len(), 3);
             if let SigmaValue::String(s) = &items[0].values[0] {
                 assert_eq!(s.to_string(), "C:\\Windows\\cmd.exe");
             } else {
                 panic!("Expected String value");
             }
+            if let SigmaValue::String(s) = &items[0].values[1] {
+                assert_eq!(s.to_string(), "D:\\Windows\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
+            if let SigmaValue::String(s) = &items[0].values[2] {
+                assert_eq!(s.to_string(), "E:\\WinNT\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
             
-            // User: %Admins% -> unchanged (not in include list)
+            // User: %Admins% -> unchanged (not in include list, stays as placeholder)
             assert_eq!(items[1].values.len(), 1);
             if let SigmaValue::String(s) = &items[1].values[0] {
+                assert_eq!(s.parts.len(), 1);
                 assert_eq!(s.parts[0], SigmaStringPart::Placeholder("Admins".to_string()));
             } else {
                 panic!("Expected String value");
