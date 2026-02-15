@@ -17,9 +17,9 @@ jobs:
     
     - name: Check for binary executables
       run: |
-        # Find all files in the repository (excluding .git directory)
+        # Find all files in the repository (excluding .git and target directories)
         # Check if they are executable binaries using 'file' command
-        binaries=$(find . -type f -not -path './.git/*' -exec file {} \; | grep -E 'ELF|PE32|Mach-O' || true)
+        binaries=$(find . -type f -not -path './.git/*' -not -path './target/*' -exec file {} \; | grep -E 'ELF|PE32|Mach-O' || true)
         if [ -n "$binaries" ]; then
           echo "Error: Binary executables found in repository:"
           echo "$binaries"
