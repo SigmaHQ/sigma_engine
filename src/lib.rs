@@ -40,9 +40,11 @@
 pub mod condition;
 pub mod error;
 mod parser;
+pub mod pipeline;
 pub mod types;
 
 pub use error::Error;
+pub use pipeline::*;
 pub use types::*;
 
 // Re-export chrono's NaiveDate for date field access

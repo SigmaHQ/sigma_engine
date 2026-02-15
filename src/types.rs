@@ -159,7 +159,7 @@ pub enum Modifier {
 // ─── Sigma String ────────────────────────────────────────────────────────────
 
 /// A part of a Sigma string value.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SigmaStringPart {
     /// A literal string segment.
     Literal(String),
@@ -172,7 +172,7 @@ pub enum SigmaStringPart {
 }
 
 /// A Sigma string that may contain literals, wildcards, and placeholders.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SigmaString {
     pub parts: Vec<SigmaStringPart>,
 }
@@ -230,13 +230,38 @@ impl From<&str> for SigmaString {
 // ─── Detection Values ────────────────────────────────────────────────────────
 
 /// A typed value that can appear in a Sigma detection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
 pub enum SigmaValue {
     String(SigmaString),
     Int(i64),
     Float(f64),
     Bool(bool),
     Null,
+}
+
+impl<'de> serde::Deserialize<'de> for SigmaValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_yaml::Value::deserialize(deserializer)?;
+        match value {
+            serde_yaml::Value::String(s) => Ok(SigmaValue::String(SigmaString::from_literal(s))),
+            serde_yaml::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(SigmaValue::Int(i))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(SigmaValue::Float(f))
+                } else {
+                    Err(serde::de::Error::custom("Invalid number"))
+                }
+            }
+            serde_yaml::Value::Bool(b) => Ok(SigmaValue::Bool(b)),
+            serde_yaml::Value::Null => Ok(SigmaValue::Null),
+            _ => Err(serde::de::Error::custom("Invalid SigmaValue type")),
+        }
+    }
 }
 
 impl fmt::Display for SigmaValue {
