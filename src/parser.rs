@@ -74,11 +74,13 @@ fn parse_document(value: Value) -> Result<SigmaDocument, Error> {
 
     if map.contains_key(&Value::String("correlation".into())) {
         Ok(SigmaDocument::Correlation(parse_correlation_rule(map)?))
+    } else if map.contains_key(&Value::String("filter".into())) {
+        Ok(SigmaDocument::Filter(parse_filter_rule(map)?))
     } else if map.contains_key(&Value::String("detection".into())) {
         Ok(SigmaDocument::Rule(parse_detection_rule(map)?))
     } else {
         Err(Error::InvalidDocument(
-            "Document must contain either 'detection' or 'correlation' section".into(),
+            "Document must contain either 'detection', 'correlation', or 'filter' section".into(),
         ))
     }
 }
@@ -706,6 +708,131 @@ fn parse_detection_rule(map: &Mapping) -> Result<SigmaRule, Error> {
         level,
         tags: get_string_list(map, "tags"),
         scope: get_string_list(map, "scope"),
+        custom,
+    })
+}
+
+// ─── Filter rule ─────────────────────────────────────────────────────────────
+
+fn parse_filter_section(value: &Value) -> Result<FilterSection, Error> {
+    let map = value.as_mapping().ok_or_else(|| {
+        Error::InvalidValue {
+            field: "filter".into(),
+            message: "Filter section must be a mapping".into(),
+        }
+    })?;
+
+    // Parse rules references (mandatory)
+    let rules_value = map.get("rules").ok_or_else(|| Error::MissingField("filter.rules".into()))?;
+    let rules = match rules_value {
+        Value::Sequence(seq) => seq
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .ok_or_else(|| Error::InvalidValue {
+                        field: "filter.rules".into(),
+                        message: "Each rule reference must be a string".into(),
+                    })
+                    .map(str::to_string)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Value::String(s) => vec![s.clone()],
+        _ => {
+            return Err(Error::InvalidValue {
+                field: "filter.rules".into(),
+                message: "Rules must be a string or list of strings".into(),
+            });
+        }
+    };
+
+    // Parse condition (mandatory)
+    let condition_value = map
+        .get("condition")
+        .ok_or_else(|| Error::MissingField("filter.condition".into()))?;
+
+    let condition_strings: Vec<String> = match condition_value {
+        Value::String(s) => vec![s.clone()],
+        Value::Sequence(seq) => seq
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .ok_or_else(|| Error::InvalidValue {
+                        field: "filter.condition".into(),
+                        message: "Condition list items must be strings".into(),
+                    })
+                    .map(str::to_string)
+            })
+            .collect::<Result<_, _>>()?,
+        _ => {
+            return Err(Error::InvalidValue {
+                field: "filter.condition".into(),
+                message: "Condition must be a string or list of strings".into(),
+            });
+        }
+    };
+
+    let conditions: Vec<ConditionExpression> = condition_strings
+        .iter()
+        .map(|s| parse_condition(s))
+        .collect::<Result<_, _>>()?;
+
+    // Parse search identifiers (every key except "rules" and "condition")
+    let mut search_identifiers = HashMap::new();
+    for (key, value) in map {
+        let key_str = key
+            .as_str()
+            .ok_or_else(|| Error::InvalidDetection(format!("Filter key must be a string: {key:?}")))?;
+        if key_str == "rules" || key_str == "condition" {
+            continue;
+        }
+        search_identifiers.insert(key_str.to_string(), parse_search_identifier(value)?);
+    }
+
+    Ok(FilterSection {
+        rules,
+        search_identifiers,
+        conditions,
+    })
+}
+
+fn parse_filter_rule(map: &Mapping) -> Result<SigmaFilter, Error> {
+    let title = get_string(map, "title")
+        .ok_or_else(|| Error::MissingField("title".into()))?;
+
+    let filter = parse_filter_section(
+        map.get("filter")
+            .ok_or_else(|| Error::MissingField("filter".into()))?,
+    )?;
+
+    let logsource = parse_logsource(
+        map.get("logsource")
+            .ok_or_else(|| Error::MissingField("logsource".into()))?,
+    )?;
+
+    let date = get_date(map, "date")?;
+    let modified = get_date(map, "modified")?;
+
+    let known_keys: &[&str] = &[
+        "title",
+        "id",
+        "description",
+        "date",
+        "modified",
+        "taxonomy",
+        "logsource",
+        "filter",
+    ];
+    let custom = collect_custom_fields(map, known_keys);
+
+    Ok(SigmaFilter {
+        title,
+        id: get_string(map, "id"),
+        description: get_string(map, "description"),
+        date,
+        modified,
+        taxonomy: get_string(map, "taxonomy"),
+        logsource,
+        filter,
         custom,
     })
 }
