@@ -172,7 +172,9 @@ impl ProcessingItem {
     
     fn apply_field_name_mapping(&self, rule: &mut SigmaRule) -> Result<()> {
         if let Some(mapping) = &self.config.mapping {
-            // We need to collect changes first to avoid borrowing issues
+            // Collect changes first to avoid mutable/immutable borrow conflict
+            // (we need to read from search_identifiers while preparing replacements,
+            // then write back to it)
             let mut replacements = Vec::new();
             
             for (search_name, search_id) in &rule.detection.search_identifiers {
@@ -228,7 +230,10 @@ impl ProcessingItem {
                             replacements.push((search_name.clone(), SearchIdentifier::MapList(mapped_variants)));
                         } else {
                             // No multi-mapping occurred, keep as Map
-                            replacements.push((search_name.clone(), SearchIdentifier::Map(mapped_variants.into_iter().next().unwrap())));
+                            // Invariant: mapped_variants always has at least one element (initialized at line 182)
+                            replacements.push((search_name.clone(), SearchIdentifier::Map(
+                                mapped_variants.into_iter().next().expect("mapped_variants should have at least one element")
+                            )));
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
