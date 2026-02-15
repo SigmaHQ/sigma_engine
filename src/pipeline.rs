@@ -91,10 +91,10 @@ impl ProcessingPipeline {
         Ok(())
     }
     
-    /// Apply multiple pipelines to a rule, sorted by priority (higher priority first).
+    /// Apply multiple pipelines to a rule, sorted by priority (lower priority first).
     pub fn apply_multiple(pipelines: &mut [ProcessingPipeline], rule: &mut SigmaRule) -> Result<()> {
-        // Sort by priority (descending)
-        pipelines.sort_by(|a, b| b.priority.cmp(&a.priority));
+        // Sort by priority (ascending - lower priority values are applied first)
+        pipelines.sort_by(|a, b| a.priority.cmp(&b.priority));
         
         for pipeline in pipelines {
             pipeline.apply(rule)?;
@@ -146,7 +146,6 @@ impl ProcessingItem {
             "set_field" => self.apply_set_field(rule),
             "replace_string" => self.apply_replace_string(rule),
             "map_string" => self.apply_map_string(rule),
-            "regex" => self.apply_regex(rule),
             "add_condition" => self.apply_add_condition(rule),
             "change_logsource" => self.apply_change_logsource(rule),
             "drop_detection_item" => self.apply_drop_detection_item(rule),
@@ -173,33 +172,124 @@ impl ProcessingItem {
     
     fn apply_field_name_mapping(&self, rule: &mut SigmaRule) -> Result<()> {
         if let Some(mapping) = &self.config.mapping {
-            for search_id in rule.detection.search_identifiers.values_mut() {
+            // We need to collect changes first to avoid borrowing issues
+            let mut replacements = Vec::new();
+            
+            for (search_name, search_id) in &rule.detection.search_identifiers {
                 match search_id {
                     SearchIdentifier::Map(items) => {
+                        let mut needs_multi_mapping = false;
+                        let mut mapped_variants = vec![Vec::new()];
+                        
                         for item in items {
                             if let Some(field) = &item.field {
                                 if let Some(new_names) = mapping.get(field) {
-                                    if let Some(new_name) = new_names.first() {
-                                        item.field = Some(new_name.clone());
+                                    if new_names.len() > 1 {
+                                        // Multiple targets: expand variants
+                                        needs_multi_mapping = true;
+                                        let mut new_variants = Vec::new();
+                                        for variant in &mapped_variants {
+                                            for new_name in new_names {
+                                                let mut new_variant = variant.clone();
+                                                new_variant.push(DetectionItem {
+                                                    field: Some(new_name.clone()),
+                                                    modifiers: item.modifiers.clone(),
+                                                    values: item.values.clone(),
+                                                });
+                                                new_variants.push(new_variant);
+                                            }
+                                        }
+                                        mapped_variants = new_variants;
+                                    } else if let Some(new_name) = new_names.first() {
+                                        // Single target: simple replacement in all variants
+                                        for variant in &mut mapped_variants {
+                                            variant.push(DetectionItem {
+                                                field: Some(new_name.clone()),
+                                                modifiers: item.modifiers.clone(),
+                                                values: item.values.clone(),
+                                            });
+                                        }
+                                    }
+                                } else {
+                                    // No mapping: keep original in all variants
+                                    for variant in &mut mapped_variants {
+                                        variant.push(item.clone());
                                     }
                                 }
+                            } else {
+                                // No field (keyword search): keep original in all variants
+                                for variant in &mut mapped_variants {
+                                    variant.push(item.clone());
+                                }
                             }
+                        }
+                        
+                        if needs_multi_mapping {
+                            replacements.push((search_name.clone(), SearchIdentifier::MapList(mapped_variants)));
+                        } else {
+                            // No multi-mapping occurred, keep as Map
+                            replacements.push((search_name.clone(), SearchIdentifier::Map(mapped_variants.into_iter().next().unwrap())));
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
+                        let mut new_maps = Vec::new();
+                        
                         for items in maps {
+                            let mut map_variants = vec![Vec::new()];
+                            
                             for item in items {
                                 if let Some(field) = &item.field {
                                     if let Some(new_names) = mapping.get(field) {
-                                        if let Some(new_name) = new_names.first() {
-                                            item.field = Some(new_name.clone());
+                                        if new_names.len() > 1 {
+                                            // Multiple targets: multiply the variants
+                                            let mut expanded_variants = Vec::new();
+                                            for variant in &map_variants {
+                                                for new_name in new_names {
+                                                    let mut new_variant = variant.clone();
+                                                    new_variant.push(DetectionItem {
+                                                        field: Some(new_name.clone()),
+                                                        modifiers: item.modifiers.clone(),
+                                                        values: item.values.clone(),
+                                                    });
+                                                    expanded_variants.push(new_variant);
+                                                }
+                                            }
+                                            map_variants = expanded_variants;
+                                        } else if let Some(new_name) = new_names.first() {
+                                            // Single target: add to all variants
+                                            for variant in &mut map_variants {
+                                                variant.push(DetectionItem {
+                                                    field: Some(new_name.clone()),
+                                                    modifiers: item.modifiers.clone(),
+                                                    values: item.values.clone(),
+                                                });
+                                            }
                                         }
+                                    } else {
+                                        // No mapping: add original to all variants
+                                        for variant in &mut map_variants {
+                                            variant.push(item.clone());
+                                        }
+                                    }
+                                } else {
+                                    // No field: add original to all variants
+                                    for variant in &mut map_variants {
+                                        variant.push(item.clone());
                                     }
                                 }
                             }
+                            
+                            new_maps.extend(map_variants);
                         }
+                        
+                        replacements.push((search_name.clone(), SearchIdentifier::MapList(new_maps)));
                     }
                 }
+            }
+            
+            // Apply replacements
+            for (name, new_search_id) in replacements {
+                rule.detection.search_identifiers.insert(name, new_search_id);
             }
         }
         Ok(())
@@ -489,14 +579,6 @@ impl ProcessingItem {
         Ok(())
     }
     
-    fn apply_regex(&self, rule: &mut SigmaRule) -> Result<()> {
-        // Temporary implementation: delegates to replace_string for basic functionality
-        // TODO: Full pySigma regex transformation includes additional options for
-        // skip_special, interpret_special, and other regex-specific behaviors
-        // that need to be implemented separately for complete compatibility
-        self.apply_replace_string(rule)
-    }
-    
     fn apply_change_logsource(&self, rule: &mut SigmaRule) -> Result<()> {
         if let Some(category) = &self.config.category {
             rule.logsource.category = Some(category.clone());
@@ -707,7 +789,7 @@ mod tests {
     }
     
     #[test]
-    fn test_field_name_mapping() {
+    fn test_field_name_mapping_multiple() {
         let yaml = r#"
 name: Test Pipeline
 transformations:
@@ -723,12 +805,50 @@ transformations:
         let mut rule = create_test_rule();
         pipeline.apply(&mut rule).unwrap();
         
-        // Check that EventID was mapped to event_id
+        // Check that EventID was mapped to multiple fields (OR-ed)
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::MapList(maps) = selection {
+            // Should have 2 variants for the EventID field (event_id and evtid)
+            // Each variant should have BOTH the mapped EventID field AND CommandLine
+            assert_eq!(maps.len(), 2);
+            
+            // First variant: event_id + CommandLine
+            assert_eq!(maps[0].len(), 2);
+            assert_eq!(maps[0][0].field.as_deref(), Some("event_id"));
+            assert_eq!(maps[0][1].field.as_deref(), Some("CommandLine"));
+            
+            // Second variant: evtid + CommandLine
+            assert_eq!(maps[1].len(), 2);
+            assert_eq!(maps[1][0].field.as_deref(), Some("evtid"));
+            assert_eq!(maps[1][1].field.as_deref(), Some("CommandLine"));
+        } else {
+            panic!("Expected MapList for multi-field mapping");
+        }
+    }
+    
+    #[test]
+    fn test_field_name_mapping_single() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: map_event_id
+    type: field_name_mapping
+    mapping:
+      EventID:
+        - event_id
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule();
+        pipeline.apply(&mut rule).unwrap();
+        
+        // Check that EventID was mapped to event_id (1:1 mapping)
         let selection = &rule.detection.search_identifiers["selection"];
         if let SearchIdentifier::Map(items) = selection {
             assert_eq!(items[0].field.as_deref(), Some("event_id"));
+            assert_eq!(items[1].field.as_deref(), Some("CommandLine"));
         } else {
-            panic!("Expected Map");
+            panic!("Expected Map for single-field mapping");
         }
     }
     
@@ -1013,11 +1133,11 @@ transformations:
         let mut rule = create_test_rule();
         ProcessingPipeline::apply_multiple(&mut pipelines, &mut rule).unwrap();
         
-        // Pipeline 2 (priority 20) should run first, then Pipeline 1 (priority 10)
-        // So: EventID -> win.EventID (mapping doesn't match "win.EventID")
+        // Pipeline 1 (priority 10) should run first, then Pipeline 2 (priority 20)
+        // So: EventID -> event_id -> win.event_id
         let selection = &rule.detection.search_identifiers["selection"];
         if let SearchIdentifier::Map(items) = selection {
-            assert_eq!(items[0].field.as_deref(), Some("win.EventID"));
+            assert_eq!(items[0].field.as_deref(), Some("win.event_id"));
         } else {
             panic!("Expected Map");
         }
@@ -1204,34 +1324,4 @@ transformations:
         }
     }
     
-    #[test]
-    fn test_regex_transformation() {
-        let yaml = r#"
-name: Test Pipeline
-transformations:
-  - id: regex_replace
-    type: regex
-    regex: "test"
-    replacement: "prod"
-    field_name_conditions:
-      - type: include_fields
-        fields:
-          - CommandLine
-"#;
-        
-        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
-        let mut rule = create_test_rule();
-        pipeline.apply(&mut rule).unwrap();
-        
-        let selection = &rule.detection.search_identifiers["selection"];
-        if let SearchIdentifier::Map(items) = selection {
-            if let SigmaValue::String(s) = &items[1].values[0] {
-                assert_eq!(s.as_plain(), Some("prod.exe"));
-            } else {
-                panic!("Expected String value");
-            }
-        } else {
-            panic!("Expected Map");
-        }
-    }
 }
