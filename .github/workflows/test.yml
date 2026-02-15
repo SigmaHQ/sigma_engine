@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check for binary executables
+      run: |
+        # Find all files in the repository (excluding .git and target directories)
+        # Check if they are executable binaries using 'file' command
+        binaries=$(find . -type f -not -path './.git/*' -not -path './target/*' -exec file {} + | grep -E 'ELF|PE32|Mach-O' || true)
+        if [ -n "$binaries" ]; then
+          echo "Error: Binary executables found in repository:"
+          echo "$binaries"
+          exit 1
+        fi
+        echo "No binary executables found."
+    
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      
+    - name: Run tests
+      run: cargo test --verbose
