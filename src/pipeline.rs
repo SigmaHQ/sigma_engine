@@ -78,6 +78,7 @@ pub struct ProcessingPipeline {
     
     /// Variables for placeholder replacement (used by `value_placeholders` transformation).
     /// Maps placeholder names to lists of replacement values.
+    /// Available to all transformations via the pipeline context.
     #[serde(default)]
     pub vars: HashMap<String, Vec<String>>,
 }
@@ -155,8 +156,14 @@ impl ProcessingItem {
             "change_logsource" => self.apply_change_logsource(rule),
             "drop_detection_item" => self.apply_drop_detection_item(rule),
             "set_state" => self.apply_set_state(rule),
-            "wildcard_placeholders" => self.apply_wildcard_placeholders(rule),
-            "value_placeholders" => self.apply_value_placeholders(rule, vars),
+            "wildcard_placeholders" => {
+                self.validate_placeholder_config()?;
+                self.apply_wildcard_placeholders(rule)
+            }
+            "value_placeholders" => {
+                self.validate_placeholder_config()?;
+                self.apply_value_placeholders(rule, vars)
+            }
             _ => Err(Error::InvalidValue {
                 field: "transformation_type".into(),
                 message: format!("Unknown transformation type: {}", self.transformation_type),
@@ -634,8 +641,21 @@ impl ProcessingItem {
     
     // ── Placeholder Transformations ──────────────────────────────────────
     
+    /// Validate that include and exclude lists are not both specified.
+    fn validate_placeholder_config(&self) -> Result<()> {
+        if self.config.include.is_some() && self.config.exclude.is_some() {
+            return Err(Error::InvalidValue {
+                field: "include/exclude".into(),
+                message: "Placeholder transformation include and exclude lists can only be used exclusively".into(),
+            });
+        }
+        Ok(())
+    }
+    
     /// Check whether a placeholder name should be handled by this transformation
     /// based on the include/exclude configuration.
+    /// Include and exclude are mutually exclusive; both being set is prevented
+    /// by validation in `apply`.
     fn is_handled_placeholder(&self, name: &str) -> bool {
         match (&self.config.include, &self.config.exclude) {
             (Some(include), _) => include.iter().any(|n| n == name),
@@ -750,7 +770,7 @@ impl ProcessingItem {
                 SigmaStringPart::Placeholder(name) if self.is_handled_placeholder(name) => {
                     let replacement_values = vars.get(name).ok_or_else(|| Error::InvalidValue {
                         field: "vars".into(),
-                        message: format!("Placeholder replacement variable '{}' doesn't exist", name),
+                        message: format!("Placeholder replacement variable '{}' does not exist", name),
                     })?;
                     
                     if replacement_values.is_empty() {
@@ -1771,7 +1791,7 @@ transformations:
         let result = pipeline.apply(&mut rule);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("doesn't exist"));
+        assert!(err.to_string().contains("does not exist"));
     }
     
     #[test]
@@ -1821,6 +1841,27 @@ transformations:
         } else {
             panic!("Expected Map");
         }
+    }
+    
+    #[test]
+    fn test_placeholder_include_exclude_mutually_exclusive() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: bad_config
+    type: wildcard_placeholders
+    include:
+      - SystemRoot
+    exclude:
+      - Admins
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        let result = pipeline.apply(&mut rule);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("exclusively"));
     }
     
 }
