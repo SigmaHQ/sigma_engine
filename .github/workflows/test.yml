@@ -15,6 +15,18 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
+    - name: Check for binary executables
+      run: |
+        # Find all files in the repository (excluding .git directory)
+        # Check if they are executable binaries using 'file' command
+        binaries=$(find . -type f -not -path './.git/*' -executable -exec file {} \; | grep -E 'ELF|PE32|Mach-O' || true)
+        if [ -n "$binaries" ]; then
+          echo "Error: Binary executables found in repository:"
+          echo "$binaries"
+          exit 1
+        fi
+        echo "No binary executables found."
+    
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
       
