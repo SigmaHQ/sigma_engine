@@ -1029,12 +1029,16 @@ filter:
         let applied = filter.apply(rule);
         assert!(applied);
 
-        // Rule should now have the filter's search identifier merged
-        let prefix = "_filter_f1f1f1f1_0000_0000_0000_000000000001_";
-        let prefixed_key = format!("{}selection", prefix);
+        // Rule should now have the filter's search identifier merged (with a hash-based prefix)
+        let has_filter_selection = rule
+            .detection
+            .search_identifiers
+            .keys()
+            .any(|k| k.starts_with("_filter_") && k.ends_with("selection"));
         assert!(
-            rule.detection.search_identifiers.contains_key(&prefixed_key),
-            "Expected filter search identifier '{prefixed_key}' in rule detection"
+            has_filter_selection,
+            "Expected a filter search identifier ending in 'selection' in rule detection, got keys: {:?}",
+            rule.detection.search_identifiers.keys().collect::<Vec<_>>()
         );
 
         // Rule's condition should be extended: original AND NOT filter
@@ -1049,10 +1053,16 @@ filter:
                 // Right should be NOT(filter_condition)
                 match right.as_ref() {
                     ConditionExpression::Not(inner) => {
-                        assert_eq!(
-                            **inner,
-                            ConditionExpression::Identifier(prefixed_key)
-                        );
+                        // The inner identifier should be the prefixed filter selection
+                        match inner.as_ref() {
+                            ConditionExpression::Identifier(name) => {
+                                assert!(
+                                    name.starts_with("_filter_") && name.ends_with("selection"),
+                                    "Expected prefixed filter identifier, got {name}"
+                                );
+                            }
+                            other => panic!("Expected Identifier, got {other:?}"),
+                        }
                     }
                     other => panic!("Expected Not, got {other:?}"),
                 }
@@ -1229,9 +1239,12 @@ filter:
         assert!(applied);
 
         // Verify both search identifiers were merged
-        let prefix = "_filter_complex_filter_";
-        assert!(rule.detection.search_identifiers.contains_key(&format!("{}sel1", prefix)));
-        assert!(rule.detection.search_identifiers.contains_key(&format!("{}sel2", prefix)));
+        let has_sel1 = rule.detection.search_identifiers.keys()
+            .any(|k| k.starts_with("_filter_") && k.ends_with("sel1"));
+        let has_sel2 = rule.detection.search_identifiers.keys()
+            .any(|k| k.starts_with("_filter_") && k.ends_with("sel2"));
+        assert!(has_sel1, "Expected filter search identifier for 'sel1'");
+        assert!(has_sel2, "Expected filter search identifier for 'sel2'");
 
         // Condition should be: selection AND NOT (prefixed_sel1 AND prefixed_sel2)
         assert_eq!(rule.detection.conditions.len(), 1);

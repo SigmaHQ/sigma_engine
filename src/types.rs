@@ -567,14 +567,16 @@ impl SigmaFilter {
             return false;
         }
 
-        // Generate a unique prefix for the filter's search identifiers
-        let prefix = format!(
-            "_filter_{}_",
-            self.id
-                .as_deref()
-                .unwrap_or("anon")
-                .replace('-', "_")
-        );
+        // Generate a unique prefix for the filter's search identifiers.
+        // Use a hash of the filter ID to avoid collisions when IDs differ
+        // only in characters like '-' vs '_'.
+        let prefix = {
+            let id_str = self.id.as_deref().unwrap_or("anon");
+            let hash = id_str.bytes().fold(0u64, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as u64)
+            });
+            format!("_filter_{:016x}_", hash)
+        };
 
         // Merge filter search identifiers into the rule's detection
         for (name, search_id) in &self.filter.search_identifiers {
@@ -598,11 +600,13 @@ impl SigmaFilter {
                     .map(|fc| prefix_identifiers(fc, &prefix))
                     .collect();
 
-                // Combine filter conditions (multiple conditions are OR-ed)
+                // Combine filter conditions (multiple conditions are OR-ed).
+                // This is safe because the parser validates that at least one
+                // condition is present in the filter section.
                 let combined_filter = filter_conds
                     .into_iter()
                     .reduce(|a, b| ConditionExpression::Or(Box::new(a), Box::new(b)))
-                    .expect("filter must have at least one condition");
+                    .expect("filter must have at least one condition (enforced by parser)");
 
                 // Extend: existing_condition and not (filter_condition)
                 ConditionExpression::And(
