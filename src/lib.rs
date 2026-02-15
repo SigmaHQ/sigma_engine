@@ -909,5 +909,449 @@ correlation:
             other => panic!("Expected Extended condition, got {other:?}"),
         }
     }
+
+    // ── Sigma Filter rules ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_basic_filter() {
+        let yaml = r#"
+title: Filter Administrator account
+description: The valid administrator account start with adm_
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - 6f3e2987-db24-4c78-a860-b4f4095a7095
+        - df0841c0-9846-4e9f-ad8a-7df91571771b
+    selection:
+        User|startswith: 'adm_'
+    condition: selection
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        assert_eq!(coll.documents.len(), 1);
+        let filter = match &coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            other => panic!("Expected Filter, got {other:?}"),
+        };
+        assert_eq!(filter.title, "Filter Administrator account");
+        assert_eq!(
+            filter.description.as_deref(),
+            Some("The valid administrator account start with adm_")
+        );
+        assert_eq!(filter.logsource.category.as_deref(), Some("process_creation"));
+        assert_eq!(filter.logsource.product.as_deref(), Some("windows"));
+
+        // Filter section
+        assert_eq!(filter.filter.rules, vec![
+            "6f3e2987-db24-4c78-a860-b4f4095a7095",
+            "df0841c0-9846-4e9f-ad8a-7df91571771b",
+        ]);
+        assert_eq!(filter.filter.search_identifiers.len(), 1);
+        assert!(filter.filter.search_identifiers.contains_key("selection"));
+        assert_eq!(filter.filter.conditions.len(), 1);
+        assert_eq!(
+            filter.filter.conditions[0],
+            ConditionExpression::Identifier("selection".into())
+        );
+    }
+
+    #[test]
+    fn parse_filter_with_id_and_dates() {
+        let yaml = r#"
+title: Filter with metadata
+id: aaaa-bbbb-cccc
+date: 2024-08-08
+modified: 2025-01-01
+taxonomy: sigma
+logsource:
+    product: windows
+filter:
+    rules:
+        - some-rule-id
+    selection:
+        User: admin
+    condition: selection
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let filter = match &coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            other => panic!("Expected Filter, got {other:?}"),
+        };
+        assert_eq!(filter.id.as_deref(), Some("aaaa-bbbb-cccc"));
+        assert_eq!(filter.taxonomy.as_deref(), Some("sigma"));
+        assert!(filter.date.is_some());
+        assert!(filter.modified.is_some());
+    }
+
+    #[test]
+    fn apply_filter_to_matching_rule() {
+        // Parse a detection rule
+        let rule_yaml = r#"
+title: Data Compressed - rar.exe
+id: 6f3e2987-db24-4c78-a860-b4f4095a7095
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image|endswith: '\rar.exe'
+    condition: selection
+level: high
+"#;
+        let mut coll = SigmaCollection::from_yaml(rule_yaml).unwrap();
+        let rule = match &mut coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+
+        // Parse a filter
+        let filter_yaml = r#"
+title: Filter Administrator account
+id: f1f1f1f1-0000-0000-0000-000000000001
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - 6f3e2987-db24-4c78-a860-b4f4095a7095
+    selection:
+        User|startswith: 'adm_'
+    condition: selection
+"#;
+        let filter_coll = SigmaCollection::from_yaml(filter_yaml).unwrap();
+        let filter = match &filter_coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            _ => panic!("Expected Filter"),
+        };
+
+        // Apply the filter
+        let applied = filter.apply(rule);
+        assert!(applied);
+
+        // Rule should now have the filter's search identifier merged (with a hash-based prefix)
+        let has_filter_selection = rule
+            .detection
+            .search_identifiers
+            .keys()
+            .any(|k| k.starts_with("_filter_") && k.ends_with("selection"));
+        assert!(
+            has_filter_selection,
+            "Expected a filter search identifier ending in 'selection' in rule detection, got keys: {:?}",
+            rule.detection.search_identifiers.keys().collect::<Vec<_>>()
+        );
+
+        // Rule's condition should be extended: original AND NOT filter
+        assert_eq!(rule.detection.conditions.len(), 1);
+        match &rule.detection.conditions[0] {
+            ConditionExpression::And(left, right) => {
+                // Left should be original condition
+                assert_eq!(
+                    **left,
+                    ConditionExpression::Identifier("selection".into())
+                );
+                // Right should be NOT(filter_condition)
+                match right.as_ref() {
+                    ConditionExpression::Not(inner) => {
+                        // The inner identifier should be the prefixed filter selection
+                        match inner.as_ref() {
+                            ConditionExpression::Identifier(name) => {
+                                assert!(
+                                    name.starts_with("_filter_") && name.ends_with("selection"),
+                                    "Expected prefixed filter identifier, got {name}"
+                                );
+                            }
+                            other => panic!("Expected Identifier, got {other:?}"),
+                        }
+                    }
+                    other => panic!("Expected Not, got {other:?}"),
+                }
+            }
+            other => panic!("Expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_not_applied_to_non_matching_rule_id() {
+        let rule_yaml = r#"
+title: Some Rule
+id: different-id-than-filter-expects
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image: test.exe
+    condition: selection
+"#;
+        let mut coll = SigmaCollection::from_yaml(rule_yaml).unwrap();
+        let rule = match &mut coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+
+        let filter_yaml = r#"
+title: Filter
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - 6f3e2987-db24-4c78-a860-b4f4095a7095
+    selection:
+        User: admin
+    condition: selection
+"#;
+        let filter_coll = SigmaCollection::from_yaml(filter_yaml).unwrap();
+        let filter = match &filter_coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            _ => panic!("Expected Filter"),
+        };
+
+        let original_conditions = rule.detection.conditions.clone();
+        let applied = filter.apply(rule);
+        assert!(!applied);
+        assert_eq!(rule.detection.conditions, original_conditions);
+    }
+
+    #[test]
+    fn filter_not_applied_to_non_matching_logsource() {
+        let rule_yaml = r#"
+title: Some Rule
+id: 6f3e2987-db24-4c78-a860-b4f4095a7095
+logsource:
+    category: network_connection
+    product: linux
+detection:
+    selection:
+        DestPort: 443
+    condition: selection
+"#;
+        let mut coll = SigmaCollection::from_yaml(rule_yaml).unwrap();
+        let rule = match &mut coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+
+        let filter_yaml = r#"
+title: Filter
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - 6f3e2987-db24-4c78-a860-b4f4095a7095
+    selection:
+        User: admin
+    condition: selection
+"#;
+        let filter_coll = SigmaCollection::from_yaml(filter_yaml).unwrap();
+        let filter = match &filter_coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            _ => panic!("Expected Filter"),
+        };
+
+        let applied = filter.apply(rule);
+        assert!(!applied);
+    }
+
+    #[test]
+    fn filter_not_applied_to_rule_without_id() {
+        let rule_yaml = r#"
+title: Rule Without ID
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image: test.exe
+    condition: selection
+"#;
+        let mut coll = SigmaCollection::from_yaml(rule_yaml).unwrap();
+        let rule = match &mut coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+
+        let filter_yaml = r#"
+title: Filter
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - some-rule-id
+    selection:
+        User: admin
+    condition: selection
+"#;
+        let filter_coll = SigmaCollection::from_yaml(filter_yaml).unwrap();
+        let filter = match &filter_coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            _ => panic!("Expected Filter"),
+        };
+
+        let applied = filter.apply(rule);
+        assert!(!applied);
+    }
+
+    #[test]
+    fn filter_with_complex_condition() {
+        let rule_yaml = r#"
+title: Test Rule
+id: target-rule-id
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image|endswith: '\cmd.exe'
+    condition: selection
+"#;
+        let mut coll = SigmaCollection::from_yaml(rule_yaml).unwrap();
+        let rule = match &mut coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+
+        let filter_yaml = r#"
+title: Complex Filter
+id: complex-filter
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - target-rule-id
+    sel1:
+        User: admin
+    sel2:
+        ParentImage|endswith: '\explorer.exe'
+    condition: sel1 and sel2
+"#;
+        let filter_coll = SigmaCollection::from_yaml(filter_yaml).unwrap();
+        let filter = match &filter_coll.documents[0] {
+            SigmaDocument::Filter(f) => f,
+            _ => panic!("Expected Filter"),
+        };
+
+        let applied = filter.apply(rule);
+        assert!(applied);
+
+        // Verify both search identifiers were merged
+        let has_sel1 = rule.detection.search_identifiers.keys()
+            .any(|k| k.starts_with("_filter_") && k.ends_with("sel1"));
+        let has_sel2 = rule.detection.search_identifiers.keys()
+            .any(|k| k.starts_with("_filter_") && k.ends_with("sel2"));
+        assert!(has_sel1, "Expected filter search identifier for 'sel1'");
+        assert!(has_sel2, "Expected filter search identifier for 'sel2'");
+
+        // Condition should be: selection AND NOT (prefixed_sel1 AND prefixed_sel2)
+        assert_eq!(rule.detection.conditions.len(), 1);
+    }
+
+    #[test]
+    fn filter_applied_to_multiple_rules_in_collection() {
+        let yaml = r#"
+---
+title: Rule A
+id: rule-a-id
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image: a.exe
+    condition: selection
+---
+title: Rule B
+id: rule-b-id
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        Image: b.exe
+    condition: selection
+---
+title: Filter Both
+id: filter-both
+logsource:
+    category: process_creation
+    product: windows
+filter:
+    rules:
+        - rule-a-id
+        - rule-b-id
+    selection:
+        User: admin
+    condition: selection
+"#;
+        let mut coll = SigmaCollection::from_yaml(yaml).unwrap();
+        assert_eq!(coll.documents.len(), 3);
+
+        // Extract filter
+        let filter = match &coll.documents[2] {
+            SigmaDocument::Filter(f) => f.clone(),
+            other => panic!("Expected Filter, got {other:?}"),
+        };
+
+        // Apply to all rules
+        let mut applied_count = 0;
+        for doc in &mut coll.documents {
+            if let SigmaDocument::Rule(rule) = doc {
+                if filter.apply(rule) {
+                    applied_count += 1;
+                }
+            }
+        }
+        assert_eq!(applied_count, 2);
+    }
+
+    #[test]
+    fn filter_missing_rules_errors() {
+        let yaml = r#"
+title: Bad Filter
+logsource:
+    category: test
+filter:
+    selection:
+        X: 1
+    condition: selection
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("filter.rules"));
+    }
+
+    #[test]
+    fn filter_missing_condition_errors() {
+        let yaml = r#"
+title: Bad Filter
+logsource:
+    category: test
+filter:
+    rules:
+        - some-id
+    selection:
+        X: 1
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("filter.condition"));
+    }
+
+    #[test]
+    fn filter_missing_logsource_errors() {
+        let yaml = r#"
+title: Bad Filter
+filter:
+    rules:
+        - some-id
+    selection:
+        X: 1
+    condition: selection
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("logsource"));
+    }
 }
 

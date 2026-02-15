@@ -502,13 +502,188 @@ pub struct SigmaCorrelationRule {
     pub custom: HashMap<String, serde_yaml::Value>,
 }
 
+// ─── Sigma Filter Rule ───────────────────────────────────────────────────────
+
+/// The `filter` section of a Sigma filter rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterSection {
+    /// References to Sigma rules (by `id`) where the filter should be applied.
+    pub rules: Vec<String>,
+    /// Named search identifiers (same semantics as in detection rules).
+    pub search_identifiers: HashMap<String, SearchIdentifier>,
+    /// The condition expression combining the search identifiers.
+    pub conditions: Vec<ConditionExpression>,
+}
+
+/// A fully-parsed Sigma filter rule.
+///
+/// Sigma filters adapt existing [`SigmaRule`] objects by adding additional
+/// conditions as defined in the filter specification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SigmaFilter {
+    /// Brief title describing the filter (max 256 chars).
+    pub title: String,
+    /// Globally unique identifier (UUID v4).
+    pub id: Option<String>,
+    /// Description of the filter.
+    pub description: Option<String>,
+    /// Creation date in ISO 8601 format (YYYY-MM-DD).
+    pub date: Option<NaiveDate>,
+    /// Last modification date in ISO 8601 format.
+    pub modified: Option<NaiveDate>,
+    /// Taxonomy identifier (default: `sigma`).
+    pub taxonomy: Option<String>,
+    /// Log source this filter applies to.
+    pub logsource: LogSource,
+    /// The filter section containing rules, selections, and conditions.
+    pub filter: FilterSection,
+    /// Any additional fields not part of the standard specification.
+    pub custom: HashMap<String, serde_yaml::Value>,
+}
+
+impl SigmaFilter {
+    /// Apply this filter to a Sigma rule, modifying its detection section.
+    ///
+    /// The filter is applied only if:
+    /// 1. The rule's id matches one of the filter's `rules` references.
+    /// 2. The rule's logsource is compatible with the filter's logsource.
+    ///
+    /// When applied, the filter's search identifiers are merged into the rule's
+    /// detection section (with a unique prefix to avoid name collisions), and the
+    /// rule's conditions are extended with `and not <filter_condition>`.
+    pub fn apply(&self, rule: &mut SigmaRule) -> bool {
+        // Check if the rule matches the filter's target rules
+        let rule_id = match &rule.id {
+            Some(id) => id.clone(),
+            None => return false,
+        };
+
+        if !self.filter.rules.contains(&rule_id) {
+            return false;
+        }
+
+        // Check logsource compatibility
+        if !self.logsource_matches(&rule.logsource) {
+            return false;
+        }
+
+        // Generate a unique prefix for the filter's search identifiers.
+        // Use a hash of the filter ID to avoid collisions when IDs differ
+        // only in characters like '-' vs '_'.
+        let prefix = {
+            let id_str = self.id.as_deref().unwrap_or("anon");
+            let hash = id_str.bytes().fold(0u64, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as u64)
+            });
+            format!("_filter_{:016x}_", hash)
+        };
+
+        // Merge filter search identifiers into the rule's detection
+        for (name, search_id) in &self.filter.search_identifiers {
+            let prefixed_name = format!("{}{}", prefix, name);
+            rule.detection
+                .search_identifiers
+                .insert(prefixed_name, search_id.clone());
+        }
+
+        // Extend each of the rule's existing conditions with the filter condition
+        let new_conditions: Vec<ConditionExpression> = rule
+            .detection
+            .conditions
+            .iter()
+            .map(|existing_cond| {
+                // Build the filter condition expression with prefixed identifiers
+                let filter_conds: Vec<ConditionExpression> = self
+                    .filter
+                    .conditions
+                    .iter()
+                    .map(|fc| prefix_identifiers(fc, &prefix))
+                    .collect();
+
+                // Combine filter conditions (multiple conditions are OR-ed).
+                // This is safe because the parser validates that at least one
+                // condition is present in the filter section.
+                let combined_filter = filter_conds
+                    .into_iter()
+                    .reduce(|a, b| ConditionExpression::Or(Box::new(a), Box::new(b)))
+                    .expect("filter must have at least one condition (enforced by parser)");
+
+                // Extend: existing_condition and not (filter_condition)
+                ConditionExpression::And(
+                    Box::new(existing_cond.clone()),
+                    Box::new(ConditionExpression::Not(Box::new(combined_filter))),
+                )
+            })
+            .collect();
+
+        rule.detection.conditions = new_conditions;
+
+        true
+    }
+
+    /// Check if the filter's logsource is compatible with a rule's logsource.
+    ///
+    /// A filter's logsource matches if every field specified in the filter
+    /// is equal to the corresponding field in the rule. Fields not specified
+    /// in the filter are ignored (wildcard match).
+    fn logsource_matches(&self, rule_logsource: &LogSource) -> bool {
+        if let Some(ref cat) = self.logsource.category {
+            if rule_logsource.category.as_deref() != Some(cat) {
+                return false;
+            }
+        }
+        if let Some(ref prod) = self.logsource.product {
+            if rule_logsource.product.as_deref() != Some(prod) {
+                return false;
+            }
+        }
+        if let Some(ref svc) = self.logsource.service {
+            if rule_logsource.service.as_deref() != Some(svc) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Prefix all `Identifier` nodes in a condition expression.
+fn prefix_identifiers(expr: &ConditionExpression, prefix: &str) -> ConditionExpression {
+    match expr {
+        ConditionExpression::And(l, r) => ConditionExpression::And(
+            Box::new(prefix_identifiers(l, prefix)),
+            Box::new(prefix_identifiers(r, prefix)),
+        ),
+        ConditionExpression::Or(l, r) => ConditionExpression::Or(
+            Box::new(prefix_identifiers(l, prefix)),
+            Box::new(prefix_identifiers(r, prefix)),
+        ),
+        ConditionExpression::Not(e) => {
+            ConditionExpression::Not(Box::new(prefix_identifiers(e, prefix)))
+        }
+        ConditionExpression::Identifier(name) => {
+            ConditionExpression::Identifier(format!("{}{}", prefix, name))
+        }
+        ConditionExpression::OneOfPattern(pattern) => {
+            ConditionExpression::OneOfPattern(format!("{}{}", prefix, pattern))
+        }
+        ConditionExpression::AllOfPattern(pattern) => {
+            ConditionExpression::AllOfPattern(format!("{}{}", prefix, pattern))
+        }
+        // OneOfThem and AllOfThem are left unchanged — they refer to
+        // all search identifiers in the detection section.
+        other => other.clone(),
+    }
+}
+
 // ─── Document / Collection ───────────────────────────────────────────────────
 
-/// A parsed Sigma YAML document: either a detection rule or a correlation rule.
+/// A parsed Sigma YAML document: either a detection rule, a correlation rule,
+/// or a filter rule.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SigmaDocument {
     Rule(SigmaRule),
     Correlation(SigmaCorrelationRule),
+    Filter(SigmaFilter),
 }
 
 /// A collection of Sigma documents parsed from a (possibly multi-document) YAML string.
