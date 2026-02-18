@@ -11,3 +11,6 @@ serde_yaml = "0.9"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 regex = "1"
+
+[dev-dependencies]
+tempfile = "3.25.0"
