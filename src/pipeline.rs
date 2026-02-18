@@ -57,7 +57,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
-use crate::types::{SigmaRule, DetectionItem, SearchIdentifier, SigmaValue, SigmaString};
+use crate::types::{SigmaRule, DetectionItem, SearchIdentifier, SigmaValue, SigmaString, SigmaStringPart};
 
 // ─── Pipeline Types ──────────────────────────────────────────────────────────
 
@@ -75,6 +75,12 @@ pub struct ProcessingPipeline {
     /// Ordered list of transformations to apply.
     #[serde(default)]
     pub transformations: Vec<ProcessingItem>,
+    
+    /// Variables for placeholder replacement (used by `value_placeholders` transformation).
+    /// Maps placeholder names to lists of replacement values.
+    /// Available to all transformations via the pipeline context.
+    #[serde(default)]
+    pub vars: HashMap<String, Vec<String>>,
 }
 
 impl ProcessingPipeline {
@@ -86,7 +92,7 @@ impl ProcessingPipeline {
     /// Apply this pipeline to a Sigma rule, transforming it in place.
     pub fn apply(&self, rule: &mut SigmaRule) -> Result<()> {
         for item in &self.transformations {
-            item.apply(rule)?;
+            item.apply(rule, &self.vars)?;
         }
         Ok(())
     }
@@ -129,7 +135,7 @@ pub struct ProcessingItem {
 
 impl ProcessingItem {
     /// Apply this transformation to a rule.
-    fn apply(&self, rule: &mut SigmaRule) -> Result<()> {
+    fn apply(&self, rule: &mut SigmaRule, vars: &HashMap<String, Vec<String>>) -> Result<()> {
         // Check if rule conditions are met
         if !self.rule_conditions.is_empty() && !self.check_rule_conditions(rule) {
             return Ok(());
@@ -150,6 +156,14 @@ impl ProcessingItem {
             "change_logsource" => self.apply_change_logsource(rule),
             "drop_detection_item" => self.apply_drop_detection_item(rule),
             "set_state" => self.apply_set_state(rule),
+            "wildcard_placeholders" => {
+                self.validate_placeholder_config()?;
+                self.apply_wildcard_placeholders(rule)
+            }
+            "value_placeholders" => {
+                self.validate_placeholder_config()?;
+                self.apply_value_placeholders(rule, vars)
+            }
             _ => Err(Error::InvalidValue {
                 field: "transformation_type".into(),
                 message: format!("Unknown transformation type: {}", self.transformation_type),
@@ -624,6 +638,173 @@ impl ProcessingItem {
         // Consider implementing a pipeline context with state storage for full compatibility.
         Ok(())
     }
+    
+    // ── Placeholder Transformations ──────────────────────────────────────
+    
+    /// Validate that include and exclude lists are not both specified.
+    fn validate_placeholder_config(&self) -> Result<()> {
+        if self.config.include.is_some() && self.config.exclude.is_some() {
+            return Err(Error::InvalidValue {
+                field: "include/exclude".into(),
+                message: "Placeholder transformation include and exclude lists can only be used exclusively".into(),
+            });
+        }
+        Ok(())
+    }
+    
+    /// Check whether a placeholder name should be handled by this transformation
+    /// based on the include/exclude configuration.
+    /// Include and exclude are mutually exclusive; both being set is prevented
+    /// by validation in `apply`.
+    fn is_handled_placeholder(&self, name: &str) -> bool {
+        match (&self.config.include, &self.config.exclude) {
+            (Some(include), _) => include.iter().any(|n| n == name),
+            (_, Some(exclude)) => !exclude.iter().any(|n| n == name),
+            (None, None) => true,
+        }
+    }
+    
+    fn apply_wildcard_placeholders(&self, rule: &mut SigmaRule) -> Result<()> {
+        for search_id in rule.detection.search_identifiers.values_mut() {
+            match search_id {
+                SearchIdentifier::Map(items) => {
+                    for item in items {
+                        self.replace_placeholders_with_wildcards(&mut item.values);
+                    }
+                }
+                SearchIdentifier::MapList(maps) => {
+                    for items in maps {
+                        for item in items {
+                            self.replace_placeholders_with_wildcards(&mut item.values);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    fn replace_placeholders_with_wildcards(&self, values: &mut Vec<SigmaValue>) {
+        for value in values {
+            if let SigmaValue::String(sigma_str) = value {
+                if sigma_str.parts.iter().any(|p| matches!(p, SigmaStringPart::Placeholder(name) if self.is_handled_placeholder(name))) {
+                    let new_parts: Vec<SigmaStringPart> = sigma_str.parts.iter().map(|part| {
+                        if let SigmaStringPart::Placeholder(name) = part {
+                            if self.is_handled_placeholder(name) {
+                                return SigmaStringPart::WildcardMulti;
+                            }
+                        }
+                        part.clone()
+                    }).collect();
+                    sigma_str.parts = new_parts;
+                }
+            }
+        }
+    }
+    
+    fn apply_value_placeholders(&self, rule: &mut SigmaRule, vars: &HashMap<String, Vec<String>>) -> Result<()> {
+        for search_id in rule.detection.search_identifiers.values_mut() {
+            match search_id {
+                SearchIdentifier::Map(items) => {
+                    for item in items {
+                        self.replace_placeholders_with_values(&mut item.values, vars)?;
+                    }
+                }
+                SearchIdentifier::MapList(maps) => {
+                    for items in maps {
+                        for item in items {
+                            self.replace_placeholders_with_values(&mut item.values, vars)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    fn replace_placeholders_with_values(
+        &self,
+        values: &mut Vec<SigmaValue>,
+        vars: &HashMap<String, Vec<String>>,
+    ) -> Result<()> {
+        let mut new_values = Vec::new();
+        
+        for value in values.iter() {
+            if let SigmaValue::String(sigma_str) = value {
+                // Check if this string contains any handled placeholders
+                let has_handled = sigma_str.parts.iter().any(|p| {
+                    matches!(p, SigmaStringPart::Placeholder(name) if self.is_handled_placeholder(name))
+                });
+                
+                if has_handled {
+                    // Expand placeholders: for each placeholder, substitute with each
+                    // value from vars, producing multiple SigmaStrings
+                    let expanded = self.expand_value_placeholder(sigma_str, vars)?;
+                    for s in expanded {
+                        new_values.push(SigmaValue::String(s));
+                    }
+                } else {
+                    new_values.push(value.clone());
+                }
+            } else {
+                new_values.push(value.clone());
+            }
+        }
+        
+        *values = new_values;
+        Ok(())
+    }
+    
+    /// Expand a SigmaString that contains placeholders into multiple SigmaStrings
+    /// by substituting placeholder values from vars.
+    fn expand_value_placeholder(
+        &self,
+        sigma_str: &SigmaString,
+        vars: &HashMap<String, Vec<String>>,
+    ) -> Result<Vec<SigmaString>> {
+        // Start with a single empty variant
+        let mut variants: Vec<Vec<SigmaStringPart>> = vec![vec![]];
+        
+        for part in &sigma_str.parts {
+            match part {
+                SigmaStringPart::Placeholder(name) if self.is_handled_placeholder(name) => {
+                    let replacement_values = vars.get(name).ok_or_else(|| Error::InvalidValue {
+                        field: "vars".into(),
+                        message: format!("Placeholder replacement variable '{}' does not exist", name),
+                    })?;
+                    
+                    if replacement_values.is_empty() {
+                        return Err(Error::InvalidValue {
+                            field: "vars".into(),
+                            message: format!("Placeholder replacement variable '{}' is empty", name),
+                        });
+                    }
+                    
+                    // Multiply variants by the number of replacement values
+                    let mut new_variants = Vec::new();
+                    for variant in &variants {
+                        for replacement in replacement_values {
+                            let mut new_variant = variant.clone();
+                            new_variant.push(SigmaStringPart::Literal(replacement.clone()));
+                            new_variants.push(new_variant);
+                        }
+                    }
+                    variants = new_variants;
+                }
+                other => {
+                    // Append non-placeholder parts to all variants
+                    for variant in &mut variants {
+                        variant.push(other.clone());
+                    }
+                }
+            }
+        }
+        
+        Ok(variants
+            .into_iter()
+            .map(|parts| SigmaString { parts })
+            .collect())
+    }
 }
 
 // ─── Transformation Configurations ───────────────────────────────────────────
@@ -677,6 +858,13 @@ pub struct TransformationConfig {
     // State management
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    
+    // Placeholder include/exclude
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
 }
 
 // ─── Conditions ──────────────────────────────────────────────────────────────
@@ -1327,6 +1515,368 @@ transformations:
         } else {
             panic!("Expected Map");
         }
+    }
+    
+    fn create_test_rule_with_placeholders() -> SigmaRule {
+        let mut search_identifiers = HashMap::new();
+        search_identifiers.insert(
+            "selection".to_string(),
+            SearchIdentifier::Map(vec![
+                DetectionItem {
+                    field: Some("Image".to_string()),
+                    modifiers: vec![],
+                    values: vec![SigmaValue::String(SigmaString {
+                        parts: vec![
+                            SigmaStringPart::Placeholder("SystemRoot".to_string()),
+                            SigmaStringPart::Literal("\\cmd.exe".to_string()),
+                        ],
+                    })],
+                },
+                DetectionItem {
+                    field: Some("User".to_string()),
+                    modifiers: vec![],
+                    values: vec![SigmaValue::String(SigmaString {
+                        parts: vec![
+                            SigmaStringPart::Placeholder("Admins".to_string()),
+                        ],
+                    })],
+                },
+            ]),
+        );
+        
+        SigmaRule {
+            title: "Placeholder Test Rule".to_string(),
+            id: None,
+            name: None,
+            related: vec![],
+            taxonomy: None,
+            status: None,
+            description: None,
+            license: None,
+            references: vec![],
+            author: None,
+            date: None,
+            modified: None,
+            logsource: LogSource {
+                category: Some("process_creation".to_string()),
+                product: Some("windows".to_string()),
+                service: None,
+                custom: HashMap::new(),
+            },
+            detection: Detection {
+                search_identifiers,
+                conditions: vec![ConditionExpression::Identifier("selection".to_string())],
+            },
+            fields: vec![],
+            falsepositives: vec![],
+            level: None,
+            tags: vec![],
+            scope: vec![],
+            custom: HashMap::new(),
+        }
+    }
+    
+    #[test]
+    fn test_wildcard_placeholders() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: wildcard_all
+    type: wildcard_placeholders
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        pipeline.apply(&mut rule).unwrap();
+        
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            // Image: %SystemRoot%\cmd.exe -> *\cmd.exe
+            if let SigmaValue::String(s) = &items[0].values[0] {
+                assert_eq!(s.parts.len(), 2);
+                assert_eq!(s.parts[0], SigmaStringPart::WildcardMulti);
+                assert_eq!(s.parts[1], SigmaStringPart::Literal("\\cmd.exe".to_string()));
+            } else {
+                panic!("Expected String value");
+            }
+            
+            // User: %Admins% -> *
+            if let SigmaValue::String(s) = &items[1].values[0] {
+                assert_eq!(s.parts.len(), 1);
+                assert_eq!(s.parts[0], SigmaStringPart::WildcardMulti);
+            } else {
+                panic!("Expected String value");
+            }
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_wildcard_placeholders_with_include() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: wildcard_some
+    type: wildcard_placeholders
+    include:
+      - SystemRoot
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        pipeline.apply(&mut rule).unwrap();
+        
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            // Image: %SystemRoot%\cmd.exe -> *\cmd.exe (handled)
+            if let SigmaValue::String(s) = &items[0].values[0] {
+                assert_eq!(s.parts[0], SigmaStringPart::WildcardMulti);
+            } else {
+                panic!("Expected String value");
+            }
+            
+            // User: %Admins% -> unchanged (not in include list)
+            if let SigmaValue::String(s) = &items[1].values[0] {
+                assert_eq!(s.parts[0], SigmaStringPart::Placeholder("Admins".to_string()));
+            } else {
+                panic!("Expected String value");
+            }
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_wildcard_placeholders_with_exclude() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: wildcard_except
+    type: wildcard_placeholders
+    exclude:
+      - Admins
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        pipeline.apply(&mut rule).unwrap();
+        
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            // Image: %SystemRoot%\cmd.exe -> *\cmd.exe (handled, not excluded)
+            if let SigmaValue::String(s) = &items[0].values[0] {
+                assert_eq!(s.parts[0], SigmaStringPart::WildcardMulti);
+            } else {
+                panic!("Expected String value");
+            }
+            
+            // User: %Admins% -> unchanged (excluded)
+            if let SigmaValue::String(s) = &items[1].values[0] {
+                assert_eq!(s.parts[0], SigmaStringPart::Placeholder("Admins".to_string()));
+            } else {
+                panic!("Expected String value");
+            }
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_value_placeholders() {
+        let yaml = r#"
+name: Test Pipeline
+vars:
+  SystemRoot:
+    - "C:\\Windows"
+    - "D:\\Windows"
+  Admins:
+    - Administrator
+    - admin
+transformations:
+  - id: replace_placeholders
+    type: value_placeholders
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        pipeline.apply(&mut rule).unwrap();
+        
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            // Image: %SystemRoot%\cmd.exe -> 2 values (C:\Windows\cmd.exe, D:\Windows\cmd.exe)
+            assert_eq!(items[0].values.len(), 2);
+            if let SigmaValue::String(s) = &items[0].values[0] {
+                assert_eq!(s.to_string(), "C:\\Windows\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
+            if let SigmaValue::String(s) = &items[0].values[1] {
+                assert_eq!(s.to_string(), "D:\\Windows\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
+            
+            // User: %Admins% -> 2 values (Administrator, admin)
+            assert_eq!(items[1].values.len(), 2);
+            if let SigmaValue::String(s) = &items[1].values[0] {
+                assert_eq!(s.as_plain(), Some("Administrator"));
+            } else {
+                panic!("Expected String value");
+            }
+            if let SigmaValue::String(s) = &items[1].values[1] {
+                assert_eq!(s.as_plain(), Some("admin"));
+            } else {
+                panic!("Expected String value");
+            }
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_value_placeholders_with_include() {
+        let yaml = r#"
+name: Test Pipeline
+vars:
+  SystemRoot:
+    - "C:\\Windows"
+    - "D:\\Windows"
+    - "E:\\WinNT"
+  Admins:
+    - Administrator
+    - root
+    - admin
+transformations:
+  - id: replace_some
+    type: value_placeholders
+    include:
+      - SystemRoot
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        pipeline.apply(&mut rule).unwrap();
+        
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            // Image: %SystemRoot%\cmd.exe -> 3 values (included placeholder expanded)
+            assert_eq!(items[0].values.len(), 3);
+            if let SigmaValue::String(s) = &items[0].values[0] {
+                assert_eq!(s.to_string(), "C:\\Windows\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
+            if let SigmaValue::String(s) = &items[0].values[1] {
+                assert_eq!(s.to_string(), "D:\\Windows\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
+            if let SigmaValue::String(s) = &items[0].values[2] {
+                assert_eq!(s.to_string(), "E:\\WinNT\\cmd.exe");
+            } else {
+                panic!("Expected String value");
+            }
+            
+            // User: %Admins% -> unchanged (not in include list, stays as placeholder)
+            assert_eq!(items[1].values.len(), 1);
+            if let SigmaValue::String(s) = &items[1].values[0] {
+                assert_eq!(s.parts.len(), 1);
+                assert_eq!(s.parts[0], SigmaStringPart::Placeholder("Admins".to_string()));
+            } else {
+                panic!("Expected String value");
+            }
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_value_placeholders_missing_var() {
+        let yaml = r#"
+name: Test Pipeline
+vars: {}
+transformations:
+  - id: replace_placeholders
+    type: value_placeholders
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        let result = pipeline.apply(&mut rule);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+    
+    #[test]
+    fn test_value_placeholders_no_placeholders_in_rule() {
+        let yaml = r#"
+name: Test Pipeline
+vars:
+  SystemRoot:
+    - "C:\\Windows"
+transformations:
+  - id: replace_placeholders
+    type: value_placeholders
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule(); // No placeholders
+        pipeline.apply(&mut rule).unwrap();
+        
+        // Rule should be unchanged
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            assert_eq!(items[0].field.as_deref(), Some("EventID"));
+            assert_eq!(items[0].values, vec![SigmaValue::Int(4688)]);
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_wildcard_placeholders_no_placeholders_in_rule() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: wildcard_all
+    type: wildcard_placeholders
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule(); // No placeholders
+        pipeline.apply(&mut rule).unwrap();
+        
+        // Rule should be unchanged
+        let selection = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::Map(items) = selection {
+            assert_eq!(items[0].field.as_deref(), Some("EventID"));
+            assert_eq!(items[0].values, vec![SigmaValue::Int(4688)]);
+        } else {
+            panic!("Expected Map");
+        }
+    }
+    
+    #[test]
+    fn test_placeholder_include_exclude_mutually_exclusive() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: bad_config
+    type: wildcard_placeholders
+    include:
+      - SystemRoot
+    exclude:
+      - Admins
+"#;
+        
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        let result = pipeline.apply(&mut rule);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("exclusively"));
     }
     
 }
