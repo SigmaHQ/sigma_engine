@@ -32,3 +32,6 @@ jobs:
       
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Run Sigma rule repository parsing test
+      run: cargo test --test sigma_rule_parsing -- --ignored --nocapture
