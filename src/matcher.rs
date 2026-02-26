@@ -39,9 +39,10 @@
 //! The matcher supports all Sigma modifiers including:
 //! - String modifiers: `contains`, `startswith`, `endswith`, `re` (regex)
 //! - Case modifiers: `cased`
-//! - Encoding modifiers: `base64`, `utf16le`, `utf16be`, `utf16`, `wide`
+//! - Encoding modifiers: `base64`, `base64offset`, `utf16le`, `utf16be`, `utf16`, `wide`
 //! - Logic modifiers: `all`, `exists`, `neq`
 //! - Numeric modifiers: `lt`, `lte`, `gt`, `gte`
+//! - Dash expansion: `windash` (generates all dash character permutations)
 //!
 //! # Thread Safety
 //!
@@ -153,8 +154,15 @@ impl SigmaRuleMatcher {
         let mut patterns = Vec::new();
         
         for value in &item.values {
-            let pattern = Self::compile_value(value, &item.modifiers)?;
-            patterns.push(pattern);
+            // For base64offset and windash, we need to generate multiple patterns
+            if item.modifiers.contains(&Modifier::Base64Offset) || 
+               item.modifiers.contains(&Modifier::Windash) {
+                let expanded_patterns = Self::compile_value_with_expansion(value, &item.modifiers)?;
+                patterns.extend(expanded_patterns);
+            } else {
+                let pattern = Self::compile_value(value, &item.modifiers)?;
+                patterns.push(pattern);
+            }
         }
 
         Ok(CompiledDetectionItem {
@@ -190,6 +198,173 @@ impl SigmaRuleMatcher {
             SigmaValue::Bool(b) => Ok(CompiledPattern::Bool(*b)),
             SigmaValue::Null => Ok(CompiledPattern::Null),
         }
+    }
+
+    /// Compile a single value with expansion for base64offset and windash.
+    fn compile_value_with_expansion(value: &SigmaValue, modifiers: &[Modifier]) -> Result<Vec<CompiledPattern>> {
+        if let SigmaValue::String(sigma_str) = value {
+            let base_str = sigma_str.to_string();
+            let mut variants = vec![base_str.clone()];
+            
+            // Apply windash first if present
+            if modifiers.contains(&Modifier::Windash) {
+                variants = Self::apply_windash_expansion(&variants);
+            }
+            
+            // Apply base64offset if present
+            if modifiers.contains(&Modifier::Base64Offset) {
+                variants = Self::apply_base64offset_expansion(&variants, modifiers)?;
+            } else {
+                // Apply other string modifiers
+                let mut processed_variants = Vec::new();
+                for variant in variants {
+                    let processed = Self::apply_string_modifiers(&variant, modifiers)?;
+                    processed_variants.push(processed);
+                }
+                variants = processed_variants;
+            }
+            
+            // Convert all variants to patterns
+            let mut patterns = Vec::new();
+            for variant in variants {
+                if modifiers.contains(&Modifier::Re) {
+                    patterns.push(CompiledPattern::Regex(variant));
+                } else if sigma_str.has_special_parts() || 
+                          modifiers.contains(&Modifier::Contains) ||
+                          modifiers.contains(&Modifier::StartsWith) ||
+                          modifiers.contains(&Modifier::EndsWith) {
+                    patterns.push(CompiledPattern::Wildcard(variant));
+                } else {
+                    patterns.push(CompiledPattern::Exact(variant));
+                }
+            }
+            
+            Ok(patterns)
+        } else {
+            // Non-string values just compile normally
+            Ok(vec![Self::compile_value(value, modifiers)?])
+        }
+    }
+
+    /// Apply windash expansion: replace dashes with all variants.
+    fn apply_windash_expansion(variants: &[String]) -> Vec<String> {
+        // Dash characters: hyphen-minus, solidus, en-dash, em-dash, horizontal bar
+        const DASH_CHARS: &[char] = &['-', '/', '–', '—', '―'];
+        
+        let mut result = Vec::new();
+        
+        for variant in variants {
+            // Find all dash positions
+            let chars: Vec<char> = variant.chars().collect();
+            let mut dash_positions = Vec::new();
+            
+            for (i, &ch) in chars.iter().enumerate() {
+                if DASH_CHARS.contains(&ch) {
+                    dash_positions.push(i);
+                }
+            }
+            
+            if dash_positions.is_empty() {
+                result.push(variant.clone());
+                continue;
+            }
+            
+            // Generate all permutations
+            let num_dashes = dash_positions.len();
+            let num_permutations = DASH_CHARS.len().pow(num_dashes as u32);
+            
+            for perm_idx in 0..num_permutations {
+                let mut new_chars = chars.clone();
+                let mut temp_idx = perm_idx;
+                
+                for &pos in &dash_positions {
+                    let dash_idx = temp_idx % DASH_CHARS.len();
+                    new_chars[pos] = DASH_CHARS[dash_idx];
+                    temp_idx /= DASH_CHARS.len();
+                }
+                
+                result.push(new_chars.iter().collect());
+            }
+        }
+        
+        result
+    }
+
+    /// Apply base64offset expansion: encode with 0, 1, and 2 byte offsets.
+    fn apply_base64offset_expansion(variants: &[String], modifiers: &[Modifier]) -> Result<Vec<String>> {
+        use std::io::Write;
+        let mut result = Vec::new();
+        
+        for variant in variants {
+            // Generate 3 variants with different offsets
+            for offset in 0..3 {
+                let mut bytes = vec![0u8; offset];
+                bytes.extend_from_slice(variant.as_bytes());
+                
+                // Apply other encoding modifiers before base64
+                let encoded_bytes = if modifiers.contains(&Modifier::Wide) || modifiers.contains(&Modifier::Utf16Le) {
+                    // UTF-16LE encoding
+                    let utf16: Vec<u16> = variant.encode_utf16().collect();
+                    let mut utf16_bytes: Vec<u8> = utf16.iter()
+                        .flat_map(|&c| c.to_le_bytes())
+                        .collect();
+                    let mut result_bytes = vec![0u8; offset];
+                    result_bytes.append(&mut utf16_bytes);
+                    result_bytes
+                } else if modifiers.contains(&Modifier::Utf16Be) {
+                    // UTF-16BE encoding
+                    let utf16: Vec<u16> = variant.encode_utf16().collect();
+                    let mut utf16_bytes: Vec<u8> = utf16.iter()
+                        .flat_map(|&c| c.to_be_bytes())
+                        .collect();
+                    let mut result_bytes = vec![0u8; offset];
+                    result_bytes.append(&mut utf16_bytes);
+                    result_bytes
+                } else {
+                    bytes
+                };
+                
+                // Base64 encode
+                let mut buf = Vec::new();
+                let mut encoder = base64::write::EncoderWriter::new(&mut buf, &base64::engine::general_purpose::STANDARD);
+                encoder.write_all(&encoded_bytes).map_err(|e| {
+                    Error::InvalidValue {
+                        field: "base64offset".to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
+                drop(encoder);
+                
+                let encoded = String::from_utf8(buf).map_err(|e| {
+                    Error::InvalidValue {
+                        field: "base64offset".to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
+                
+                // Skip the padding bytes at the beginning
+                let skip_chars = (offset * 4 + 2) / 3;
+                if encoded.len() > skip_chars {
+                    result.push(encoded[skip_chars..].to_string());
+                }
+            }
+        }
+        
+        // Apply other string modifiers (contains, startswith, endswith)
+        let mut final_result = Vec::new();
+        for variant in result {
+            let mut processed = variant;
+            if modifiers.contains(&Modifier::Contains) {
+                processed = format!("*{}*", processed);
+            } else if modifiers.contains(&Modifier::StartsWith) {
+                processed = format!("{}*", processed);
+            } else if modifiers.contains(&Modifier::EndsWith) {
+                processed = format!("*{}", processed);
+            }
+            final_result.push(processed);
+        }
+        
+        Ok(final_result)
     }
 
     /// Apply string transformation modifiers to a value.
@@ -235,6 +410,8 @@ impl SigmaRuleMatcher {
                         .collect();
                     String::from_utf8_lossy(&bytes).to_string()
                 }
+                // Skip these modifiers as they're handled separately
+                Modifier::Base64Offset | Modifier::Windash => result,
                 _ => result, // Other modifiers don't transform the string
             };
         }
@@ -1101,4 +1278,360 @@ detection:
         event3.insert("User".to_string(), "testadmin".to_string());
         assert!(!matcher.matches(&event3));
     }
+
+    #[test]
+    fn test_matcher_base64_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        CommandLine|base64|contains: 'test'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // "test" in base64 is "dGVzdA=="
+        let mut event = HashMap::new();
+        event.insert("CommandLine".to_string(), "some dGVzdA== command".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_base64offset_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        CommandLine|base64offset|contains: 'test'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Test with offset 0: "test" -> "dGVzdA=="
+        let mut event1 = HashMap::new();
+        event1.insert("CommandLine".to_string(), "prefix dGVzdA== suffix".to_string());
+        assert!(matcher.matches(&event1));
+
+        // Test with offset 1: prepend one byte -> "AHRlc3Q=" -> skip 2 -> "Rlc3Q="
+        let mut event2 = HashMap::new();
+        event2.insert("CommandLine".to_string(), "prefix Rlc3Q= suffix".to_string());
+        assert!(matcher.matches(&event2));
+
+        // Test with offset 2: prepend two bytes -> "AAB0ZXN0" -> skip 3 -> "0ZXN0"
+        let mut event3 = HashMap::new();
+        event3.insert("CommandLine".to_string(), "prefix 0ZXN0 suffix".to_string());
+        assert!(matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_windash_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|windash|contains: 'test-flag'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Test with hyphen-minus
+        let mut event1 = HashMap::new();
+        event1.insert("CommandLine".to_string(), "cmd.exe test-flag".to_string());
+        assert!(matcher.matches(&event1));
+
+        // Test with forward slash
+        let mut event2 = HashMap::new();
+        event2.insert("CommandLine".to_string(), "cmd.exe test/flag".to_string());
+        assert!(matcher.matches(&event2));
+
+        // Test with en-dash
+        let mut event3 = HashMap::new();
+        event3.insert("CommandLine".to_string(), "cmd.exe test–flag".to_string());
+        assert!(matcher.matches(&event3));
+
+        // Test with em-dash
+        let mut event4 = HashMap::new();
+        event4.insert("CommandLine".to_string(), "cmd.exe test—flag".to_string());
+        assert!(matcher.matches(&event4));
+
+        // Test with horizontal bar
+        let mut event5 = HashMap::new();
+        event5.insert("CommandLine".to_string(), "cmd.exe test―flag".to_string());
+        assert!(matcher.matches(&event5));
+    }
+
+    #[test]
+    fn test_matcher_utf16_modifiers() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|utf16le|contains: 'A'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // "A" in UTF-16LE is "A\x00"
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "prefix A\x00 suffix".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_wide_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|wide|contains: 'AB'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // "AB" in UTF-16LE (wide) is "A\x00B\x00"
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "prefix A\x00B\x00 suffix".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_neq_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        EventID: 4688
+        User|neq: 'SYSTEM'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4688".to_string());
+        event1.insert("User".to_string(), "Administrator".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4688".to_string());
+        event2.insert("User".to_string(), "SYSTEM".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_numeric_lt() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count|lt: 100
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Count".to_string(), "50".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Count".to_string(), "150".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_numeric_lte() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count|lte: 100
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Count".to_string(), "100".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Count".to_string(), "101".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_numeric_gt() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count|gt: 100
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Count".to_string(), "150".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Count".to_string(), "50".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_numeric_gte() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count|gte: 100
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Count".to_string(), "100".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Count".to_string(), "99".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_windash_multiple_dashes() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|windash|contains: 'test-flag-value'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Test with mixed dash types
+        let mut event = HashMap::new();
+        event.insert("CommandLine".to_string(), "cmd.exe test/flag—value".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_base64offset_with_wide() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        CommandLine|wide|base64offset|contains: 'test'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // This should match one of the base64-encoded UTF-16LE variants of "test"
+        // UTF-16LE of "test" is "t\x00e\x00s\x00t\x00" (bytes: 74 00 65 00 73 00 74 00)
+        // Offset 0: "dABlAHMAdAA="
+        let mut event = HashMap::new();
+        event.insert("CommandLine".to_string(), "prefix dABlAHMAdAA= suffix".to_string());
+        assert!(matcher.matches(&event));
+        
+        // Offset 1: skip 2 -> "QAZQBzAHQA"
+        let mut event2 = HashMap::new();
+        event2.insert("CommandLine".to_string(), "prefix QAZQBzAHQA suffix".to_string());
+        assert!(matcher.matches(&event2));
+    }
 }
+
