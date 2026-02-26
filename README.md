@@ -9,9 +9,10 @@ A performant Rust library for parsing [Sigma](https://sigmahq.io) detection and 
 - **Full Modifier Support**: Complete support for Sigma modifiers including:
   - String modifiers: `contains`, `startswith`, `endswith`, `re` (regex)
   - Case modifiers: `cased`
-  - Encoding modifiers: `base64`, `utf16le`, `utf16be`, `utf16`, `wide`
+  - Encoding modifiers: `base64`, `base64offset`, `utf16le`, `utf16be`, `utf16`, `wide`
   - Logic modifiers: `all`, `exists`, `neq`
   - Numeric modifiers: `lt`, `lte`, `gt`, `gte`
+  - Dash expansion: `windash` (for Windows command-line flags)
 - **Multithreaded Processing**: Process log events using multiple threads with message passing
 - **Log Source Matching**: Automatic dispatching of events to matching rules based on log source
 - **Multiple Input Formats**: Support for JSON, plain text, and Field="Value" formats
@@ -162,6 +163,54 @@ This demonstrates:
 - Creating a multithreaded processor
 - Sending events in different formats
 - Receiving and displaying detections
+
+Run the modifier demonstration example:
+
+```bash
+cargo run --example modifier_demo
+```
+
+This demonstrates:
+- Using `base64offset` to detect base64-encoded strings with any byte alignment
+- Using `windash` to detect Windows command-line flags with any dash character variant
+
+## Advanced Modifiers
+
+### base64offset
+
+The `base64offset` modifier generates three Base64-encoded variants of a string with different byte alignments (offsets 0, 1, and 2). This is crucial for detecting base64-encoded payloads that may appear at any byte boundary in a data stream.
+
+```yaml
+detection:
+  selection:
+    CommandLine|base64offset|contains: 'Invoke-WebRequest'
+```
+
+This will match base64-encoded "Invoke-WebRequest" regardless of byte alignment in the command line.
+
+### windash
+
+The `windash` modifier generates all permutations of dash characters, making it easy to detect Windows command-line flags that can use multiple dash character variants:
+
+```yaml
+detection:
+  selection:
+    CommandLine|windash|contains: '-addstore'
+```
+
+This will match any of: `-addstore`, `/addstore`, `–addstore` (en-dash), `—addstore` (em-dash), or `―addstore` (horizontal bar).
+
+### Modifier Chaining
+
+Modifiers can be chained for powerful detection capabilities:
+
+```yaml
+# Detect UTF-16LE encoded, base64-encoded strings with any offset
+CommandLine|wide|base64offset|contains: 'malicious'
+
+# Detect all dash variants with case-sensitive matching
+CommandLine|windash|cased|contains: '-Flag'
+```
 
 ## Threading Model
 
