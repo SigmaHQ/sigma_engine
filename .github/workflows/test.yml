@@ -33,5 +33,11 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+    - name: Install cargo-tarpaulin
+      run: cargo install cargo-tarpaulin
+
+    - name: Run coverage check
+      run: cargo tarpaulin --fail-under 95
+
     - name: Run Sigma rule repository parsing test
       run: cargo test --test sigma_rule_parsing -- --ignored --nocapture
