@@ -1879,4 +1879,424 @@ transformations:
         assert!(err.to_string().contains("exclusively"));
     }
     
+    #[test]
+    fn test_unknown_transformation_type() {
+        let yaml = r#"
+name: Test Pipeline
+transformations:
+  - id: bad
+    type: nonexistent_type
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule();
+        let err = pipeline.apply(&mut rule).unwrap_err();
+        assert!(err.to_string().contains("Unknown transformation type"));
+    }
+
+    fn create_test_rule_with_maplist() -> SigmaRule {
+        let mut search_identifiers = HashMap::new();
+        search_identifiers.insert(
+            "selection".to_string(),
+            SearchIdentifier::MapList(vec![
+                vec![DetectionItem {
+                    field: Some("EventID".to_string()),
+                    modifiers: vec![],
+                    values: vec![SigmaValue::Int(4688)],
+                }],
+                vec![DetectionItem {
+                    field: Some("CommandLine".to_string()),
+                    modifiers: vec![],
+                    values: vec![SigmaValue::String(SigmaString::from_literal("test.exe"))],
+                }],
+            ]),
+        );
+        SigmaRule {
+            title: "MapList Rule".to_string(),
+            id: None, name: None, related: vec![], taxonomy: None,
+            status: None, description: None, license: None, references: vec![],
+            author: None, date: None, modified: None,
+            logsource: LogSource {
+                category: Some("process_creation".to_string()),
+                product: Some("windows".to_string()),
+                service: Some("sysmon".to_string()),
+                custom: HashMap::new(),
+            },
+            detection: Detection {
+                search_identifiers,
+                conditions: vec![ConditionExpression::Identifier("selection".to_string())],
+            },
+            fields: vec![], falsepositives: vec![], level: None,
+            tags: vec![], scope: vec![], custom: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_field_name_mapping_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: map
+    type: field_name_mapping
+    mapping:
+      EventID:
+        - event_id
+        - evtid
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        let sel = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::MapList(maps) = sel {
+            // First map (EventID) gets expanded into two variants; second map unchanged
+            assert!(maps.len() >= 3);
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_field_name_prefix_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: pfx
+    type: field_name_prefix
+    prefix: "x."
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            assert_eq!(maps[0][0].field.as_deref(), Some("x.EventID"));
+            assert_eq!(maps[1][0].field.as_deref(), Some("x.CommandLine"));
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_field_name_suffix_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: sfx
+    type: field_name_suffix
+    suffix: ".kw"
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            assert_eq!(maps[0][0].field.as_deref(), Some("EventID.kw"));
+            assert_eq!(maps[1][0].field.as_deref(), Some("CommandLine.kw"));
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_add_field_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: add
+    type: add_field
+    field: idx
+    value: "win"
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            for m in maps {
+                assert!(m.iter().any(|i| i.field.as_deref() == Some("idx")));
+            }
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_remove_field_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: rm
+    type: remove_field
+    field: EventID
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            assert!(maps[0].iter().all(|i| i.field.as_deref() != Some("EventID")));
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_replace_string_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: rep
+    type: replace_string
+    regex: "\\.exe$"
+    replacement: ".bin"
+    field_name_conditions:
+      - type: include_fields
+        fields:
+          - CommandLine
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            if let SigmaValue::String(s) = &maps[1][0].values[0] {
+                assert_eq!(s.as_plain(), Some("test.bin"));
+            }
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_map_string_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: ms
+    type: map_string
+    mapping:
+      test.exe:
+        - new.exe
+    field_name_conditions:
+      - type: include_fields
+        fields:
+          - CommandLine
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            if let SigmaValue::String(s) = &maps[1][0].values[0] {
+                assert_eq!(s.as_plain(), Some("new.exe"));
+            }
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_add_condition_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: ac
+    type: add_condition
+    conditions:
+      source: "sysmon"
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            for m in maps {
+                assert!(m.iter().any(|i| i.field.as_deref() == Some("source")));
+            }
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_field_name_prefix_mapping_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: pfm
+    type: field_name_prefix_mapping
+    mapping:
+      Event:
+        - evt.
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            assert_eq!(maps[0][0].field.as_deref(), Some("evt.ID"));
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_change_logsource_service() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: cls
+    type: change_logsource
+    service: audit
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule();
+        pipeline.apply(&mut rule).unwrap();
+        assert_eq!(rule.logsource.service.as_deref(), Some("audit"));
+    }
+
+    #[test]
+    fn test_drop_detection_item_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: drop
+    type: drop_detection_item
+    field: EventID
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            assert!(maps[0].is_empty());
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_set_state() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: state
+    type: set_state
+    key: my_state
+    value: "yes"
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule();
+        // set_state is a no-op but should not error
+        pipeline.apply(&mut rule).unwrap();
+    }
+
+    #[test]
+    fn test_wildcard_placeholders_maplist() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: wc
+    type: wildcard_placeholders
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut search_identifiers = HashMap::new();
+        search_identifiers.insert(
+            "sel".to_string(),
+            SearchIdentifier::MapList(vec![vec![DetectionItem {
+                field: Some("Image".to_string()),
+                modifiers: vec![],
+                values: vec![SigmaValue::String(SigmaString {
+                    parts: vec![SigmaStringPart::Placeholder("X".to_string())],
+                })],
+            }]]),
+        );
+        let mut rule = SigmaRule {
+            title: "T".into(), id: None, name: None, related: vec![], taxonomy: None,
+            status: None, description: None, license: None, references: vec![],
+            author: None, date: None, modified: None,
+            logsource: LogSource { category: None, product: None, service: None, custom: HashMap::new() },
+            detection: Detection { search_identifiers, conditions: vec![ConditionExpression::Identifier("sel".into())] },
+            fields: vec![], falsepositives: vec![], level: None, tags: vec![], scope: vec![], custom: HashMap::new(),
+        };
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["sel"] {
+            if let SigmaValue::String(s) = &maps[0][0].values[0] {
+                assert_eq!(s.parts[0], SigmaStringPart::WildcardMulti);
+            }
+        }
+    }
+
+    #[test]
+    fn test_value_placeholders_maplist() {
+        let yaml = r#"
+name: Test
+vars:
+  X:
+    - "val1"
+transformations:
+  - id: vp
+    type: value_placeholders
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut search_identifiers = HashMap::new();
+        search_identifiers.insert(
+            "sel".to_string(),
+            SearchIdentifier::MapList(vec![vec![DetectionItem {
+                field: Some("F".to_string()),
+                modifiers: vec![],
+                values: vec![SigmaValue::String(SigmaString {
+                    parts: vec![SigmaStringPart::Placeholder("X".to_string())],
+                })],
+            }]]),
+        );
+        let mut rule = SigmaRule {
+            title: "T".into(), id: None, name: None, related: vec![], taxonomy: None,
+            status: None, description: None, license: None, references: vec![],
+            author: None, date: None, modified: None,
+            logsource: LogSource { category: None, product: None, service: None, custom: HashMap::new() },
+            detection: Detection { search_identifiers, conditions: vec![ConditionExpression::Identifier("sel".into())] },
+            fields: vec![], falsepositives: vec![], level: None, tags: vec![], scope: vec![], custom: HashMap::new(),
+        };
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["sel"] {
+            if let SigmaValue::String(s) = &maps[0][0].values[0] {
+                assert_eq!(s.as_plain(), Some("val1"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_expand_value_placeholder_empty_var() {
+        let yaml = r#"
+name: Test
+vars:
+  Empty: []
+transformations:
+  - id: vp
+    type: value_placeholders
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_placeholders();
+        // Replace Admins placeholder with Empty
+        if let SearchIdentifier::Map(items) = rule.detection.search_identifiers.get_mut("selection").unwrap() {
+            items[1].values = vec![SigmaValue::String(SigmaString {
+                parts: vec![SigmaStringPart::Placeholder("Empty".to_string())],
+            })];
+            items[0].values = vec![SigmaValue::String(SigmaString::from_literal("plain"))];
+        }
+        let err = pipeline.apply(&mut rule).unwrap_err();
+        assert!(err.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn test_logsource_service_condition() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: pfx
+    type: field_name_prefix
+    prefix: "s."
+    rule_conditions:
+      - type: logsource_service
+        service: sysmon
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        if let SearchIdentifier::MapList(maps) = &rule.detection.search_identifiers["selection"] {
+            assert_eq!(maps[0][0].field.as_deref(), Some("s.EventID"));
+        }
+    }
+    
 }

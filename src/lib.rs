@@ -909,5 +909,501 @@ correlation:
             other => panic!("Expected Extended condition, got {other:?}"),
         }
     }
+
+    // ── Parser coverage tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_get_string_list_single_string() {
+        // references as a single string (not a list) triggers get_string_list single-string path
+        let yaml = r#"
+title: Single Ref
+references: "https://example.com"
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        assert_eq!(rule.references, vec!["https://example.com"]);
+    }
+
+    #[test]
+    fn parse_value_as_string_number_and_bool() {
+        // Numeric date triggers value_as_string for numbers
+        let yaml = r#"
+title: Numeric Date
+date: 20240115
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("Invalid date format"));
+    }
+
+    #[test]
+    fn parse_relation_type_merged_renamed_similar() {
+        let yaml = r#"
+title: Related Types
+related:
+    - id: aaa
+      type: merged
+    - id: bbb
+      type: renamed
+    - id: ccc
+      type: similar
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        assert_eq!(rule.related[0].relation_type, RelationType::Merged);
+        assert_eq!(rule.related[1].relation_type, RelationType::Renamed);
+        assert_eq!(rule.related[2].relation_type, RelationType::Similar);
+    }
+
+    #[test]
+    fn parse_correlation_type_value_avg_and_percentile() {
+        let yaml = r#"
+title: Avg
+correlation:
+    type: value_avg
+    rules:
+        - rule_a
+    group-by:
+        - User
+    timespan: 1h
+    condition:
+        field: bytes
+        gte: 100
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let corr = match &coll.documents[0] {
+            SigmaDocument::Correlation(c) => c,
+            _ => panic!("Expected Correlation"),
+        };
+        assert_eq!(corr.correlation.correlation_type, CorrelationType::ValueAvg);
+
+        let yaml2 = r#"
+title: Percentile
+correlation:
+    type: value_percentile
+    rules:
+        - rule_a
+    condition:
+        field: latency
+        gt: 500
+"#;
+        let coll2 = SigmaCollection::from_yaml(yaml2).unwrap();
+        let corr2 = match &coll2.documents[0] {
+            SigmaDocument::Correlation(c) => c,
+            _ => panic!("Expected Correlation"),
+        };
+        assert_eq!(corr2.correlation.correlation_type, CorrelationType::ValuePercentile);
+    }
+
+    #[test]
+    fn parse_sigma_string_wildcards_and_escapes() {
+        // `?` wildcard and escaped chars via detection values
+        let yaml = r#"
+title: Wildcard Test
+logsource:
+    category: test
+detection:
+    sel:
+        Path: 'C:\Windows\*.dl?'
+        Escaped: 'test\*literal'
+        TrailingBackslash: 'end\'
+    condition: sel
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        let items = match &rule.detection.search_identifiers["sel"] {
+            SearchIdentifier::Map(items) => items,
+            _ => panic!("Expected Map"),
+        };
+        // Path contains WildcardMulti and WildcardSingle
+        if let SigmaValue::String(s) = &items[0].values[0] {
+            assert!(s.has_special_parts());
+        }
+        // Escaped: test*literal (escaped *, should be literal)
+        if let SigmaValue::String(s) = &items[1].values[0] {
+            assert_eq!(s.as_plain(), Some("test*literal"));
+        }
+        // TrailingBackslash
+        if let SigmaValue::String(s) = &items[2].values[0] {
+            assert_eq!(s.as_plain(), Some("end\\"));
+        }
+    }
+
+    #[test]
+    fn parse_yaml_to_sigma_value_float() {
+        let yaml = r#"
+title: Float Test
+logsource:
+    category: test
+detection:
+    sel:
+        Score: 3.14
+    condition: sel
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        let items = match &rule.detection.search_identifiers["sel"] {
+            SearchIdentifier::Map(items) => items,
+            _ => panic!("Expected Map"),
+        };
+        assert!(matches!(&items[0].values[0], SigmaValue::Float(f) if (*f - 3.14).abs() < 0.01));
+    }
+
+    #[test]
+    fn parse_expand_modifier() {
+        let yaml = r#"
+title: Expand Test
+logsource:
+    category: test
+detection:
+    sel:
+        Path|expand: '%SystemRoot%\cmd.exe'
+    condition: sel
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        let items = match &rule.detection.search_identifiers["sel"] {
+            SearchIdentifier::Map(items) => items,
+            _ => panic!("Expected Map"),
+        };
+        if let SigmaValue::String(s) = &items[0].values[0] {
+            assert!(s.parts.iter().any(|p| matches!(p, SigmaStringPart::Placeholder(name) if name == "SystemRoot")));
+        }
+    }
+
+    #[test]
+    fn parse_search_identifier_empty_list_error() {
+        let yaml = r#"
+title: Empty List
+logsource:
+    category: test
+detection:
+    sel: []
+    condition: sel
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("Empty detection list"));
+    }
+
+    #[test]
+    fn parse_search_identifier_mixed_types_error() {
+        let yaml = r#"
+title: Mixed
+logsource:
+    category: test
+detection:
+    sel:
+        - 'string_val'
+        - FieldA: 'map_val'
+    condition: sel
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("mixed types"));
+    }
+
+    #[test]
+    fn parse_search_identifier_scalar_error() {
+        // A bare scalar (not mapping or sequence) as search identifier
+        let yaml = r#"
+title: Bare Scalar
+logsource:
+    category: test
+detection:
+    sel: 42
+    condition: sel
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("mapping or sequence"));
+    }
+
+    #[test]
+    fn parse_condition_list_non_string_error() {
+        let yaml = r#"
+title: Bad Cond
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition:
+        - sel
+        - 42
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("Condition list items must be strings"));
+    }
+
+    #[test]
+    fn parse_related_error_not_sequence() {
+        let yaml = r#"
+title: Bad Related
+related: "not a list"
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("Must be a sequence"));
+    }
+
+    #[test]
+    fn parse_related_error_not_mapping() {
+        let yaml = r#"
+title: Bad Related Item
+related:
+    - "not a mapping"
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("must be a mapping"));
+    }
+
+    #[test]
+    fn parse_detection_rule_all_known_keys() {
+        let yaml = r#"
+title: Full Rule
+id: abc-123
+name: my_rule
+taxonomy: sigma
+status: stable
+description: A test
+license: MIT
+author: Tester
+date: 2024-01-01
+modified: 2024-06-15
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+fields:
+    - FieldA
+falsepositives:
+    - "none"
+level: low
+tags:
+    - attack.initial_access
+scope:
+    - server
+custom_key: custom_val
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        assert_eq!(rule.taxonomy.as_deref(), Some("sigma"));
+        assert_eq!(rule.license.as_deref(), Some("MIT"));
+        assert_eq!(rule.fields, vec!["FieldA"]);
+        assert_eq!(rule.falsepositives, vec!["none"]);
+        assert_eq!(rule.status, Some(Status::Stable));
+        assert_eq!(rule.level, Some(Level::Low));
+        assert!(rule.custom.contains_key("custom_key"));
+    }
+
+    #[test]
+    fn parse_aliases_errors() {
+        // alias value not a mapping
+        let yaml = r#"
+title: Bad Alias
+correlation:
+    type: temporal
+    rules:
+        - a
+    aliases:
+        ip: "not_a_map"
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("must map to a mapping"));
+    }
+
+    #[test]
+    fn parse_correlation_condition_bad_type_error() {
+        // condition as a list (not string or mapping)
+        let yaml = r#"
+title: Bad Cond
+correlation:
+    type: event_count
+    rules:
+        - r1
+    condition:
+        - bad
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("Correlation condition must be a string or mapping"));
+    }
+
+    #[test]
+    fn parse_correlation_section_not_mapping_error() {
+        // correlation value not a mapping
+        let yaml = r#"
+title: Bad Corr
+correlation: "not_a_map"
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("Must be a mapping"));
+    }
+
+    #[test]
+    fn parse_collect_ids_pattern_error() {
+        // Extended condition with pattern (e.g. all of them) when rules is provided
+        let yaml = r#"
+title: Pattern in Extended
+correlation:
+    type: temporal
+    rules:
+        - a
+    condition: all of them
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("explicit rule names"));
+    }
+
+    #[test]
+    fn parse_correlation_rule_fields() {
+        let yaml = r#"
+title: Full Correlation
+id: corr-1
+name: my_corr
+status: test
+description: correlation desc
+author: Tester
+references:
+    - "https://example.com"
+date: 2024-03-01
+modified: 2024-04-01
+taxonomy: sigma
+correlation:
+    type: event_count
+    rules:
+        - r1
+    condition:
+        gte: 5
+falsepositives:
+    - "fp1"
+level: critical
+generate: true
+custom_corr_key: val
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let corr = match &coll.documents[0] {
+            SigmaDocument::Correlation(c) => c,
+            _ => panic!("Expected Correlation"),
+        };
+        assert_eq!(corr.description.as_deref(), Some("correlation desc"));
+        assert_eq!(corr.author.as_deref(), Some("Tester"));
+        assert_eq!(corr.references, vec!["https://example.com"]);
+        assert_eq!(corr.date, Some(chrono::NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()));
+        assert_eq!(corr.modified, Some(chrono::NaiveDate::from_ymd_opt(2024, 4, 1).unwrap()));
+        assert_eq!(corr.taxonomy.as_deref(), Some("sigma"));
+        assert_eq!(corr.falsepositives, vec!["fp1"]);
+        assert_eq!(corr.level, Some(Level::Critical));
+        assert_eq!(corr.generate, Some(true));
+        assert!(corr.custom.contains_key("custom_corr_key"));
+    }
+
+    #[test]
+    fn parse_level_informational() {
+        let yaml = r#"
+title: Info Level
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+level: informational
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        assert_eq!(rule.level, Some(Level::Informational));
+    }
+
+    #[test]
+    fn parse_level_medium_and_critical() {
+        let yaml = r#"
+title: Med Level
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+level: medium
+"#;
+        let coll = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &coll.documents[0] {
+            SigmaDocument::Rule(r) => r,
+            _ => panic!("Expected Rule"),
+        };
+        assert_eq!(rule.level, Some(Level::Medium));
+    }
+
+    #[test]
+    fn parse_level_error() {
+        let yaml = r#"
+title: Bad Level
+logsource:
+    category: test
+detection:
+    sel:
+        X: 1
+    condition: sel
+level: bogus
+"#;
+        let err = SigmaCollection::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn error_type_result_alias() {
+        // Cover error.rs line 38 (type Result)
+        let r: crate::error::Result<()> = Ok(());
+        assert!(r.is_ok());
+    }
 }
 
