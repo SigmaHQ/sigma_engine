@@ -596,6 +596,12 @@ mod tests {
 
         let bool_val: SigmaValue = serde_yaml::from_str("true").unwrap();
         assert_eq!(bool_val, SigmaValue::Bool(true));
+
+        let int_val: SigmaValue = serde_yaml::from_str("42").unwrap();
+        assert_eq!(int_val, SigmaValue::Int(42));
+
+        let null_val: SigmaValue = serde_yaml::from_str("null").unwrap();
+        assert_eq!(null_val, SigmaValue::Null);
     }
 
     #[test]

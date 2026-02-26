@@ -1931,7 +1931,7 @@ transformations:
     }
 
     #[test]
-    fn test_field_name_mapping_maplist() {
+    fn test_field_name_mapping_maplist_multi() {
         let yaml = r#"
 name: Test
 transformations:
@@ -1949,6 +1949,144 @@ transformations:
         if let SearchIdentifier::MapList(maps) = sel {
             // First map (EventID) gets expanded into two variants; second map unchanged
             assert!(maps.len() >= 3);
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_field_name_mapping_maplist_single() {
+        // MapList with single-target mapping → covers lines 279-283
+        let yaml = r#"
+name: Test
+transformations:
+  - id: map
+    type: field_name_mapping
+    mapping:
+      EventID:
+        - event_id
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist();
+        pipeline.apply(&mut rule).unwrap();
+        let sel = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::MapList(maps) = sel {
+            assert_eq!(maps[0][0].field.as_deref(), Some("event_id"));
+            assert_eq!(maps[1][0].field.as_deref(), Some("CommandLine"));
+        } else {
+            panic!("Expected MapList");
+        }
+    }
+
+    #[test]
+    fn test_field_name_mapping_map_with_keyword_and_multi() {
+        // Map with a keyword search (no field) AND a multi-mapped field → covers lines 237-238
+        let mut search_identifiers = HashMap::new();
+        search_identifiers.insert(
+            "selection".to_string(),
+            SearchIdentifier::Map(vec![
+                DetectionItem {
+                    field: Some("EventID".to_string()),
+                    modifiers: vec![],
+                    values: vec![SigmaValue::Int(4688)],
+                },
+                DetectionItem {
+                    field: None, // keyword search
+                    modifiers: vec![],
+                    values: vec![SigmaValue::String(SigmaString::from_literal("keyword"))],
+                },
+            ]),
+        );
+        let mut rule = SigmaRule {
+            title: "Test".to_string(),
+            id: None, name: None, related: vec![], taxonomy: None,
+            status: None, description: None, license: None, references: vec![],
+            author: None, date: None, modified: None,
+            logsource: LogSource {
+                category: Some("test".to_string()),
+                product: None, service: None, custom: HashMap::new(),
+            },
+            detection: Detection {
+                search_identifiers,
+                conditions: vec![ConditionExpression::Identifier("selection".to_string())],
+            },
+            fields: vec![], falsepositives: vec![], level: None,
+            tags: vec![], scope: vec![], custom: HashMap::new(),
+        };
+        let yaml = r#"
+name: Test
+transformations:
+  - id: map
+    type: field_name_mapping
+    mapping:
+      EventID:
+        - event_id
+        - evtid
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        pipeline.apply(&mut rule).unwrap();
+        let sel = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::MapList(maps) = sel {
+            assert_eq!(maps.len(), 2);
+            // Each variant should have the keyword item
+            assert!(maps[0].iter().any(|i| i.field.is_none()));
+            assert!(maps[1].iter().any(|i| i.field.is_none()));
+        } else {
+            panic!("Expected MapList due to multi-mapping");
+        }
+    }
+
+    fn create_test_rule_with_maplist_keyword() -> SigmaRule {
+        // MapList that includes a keyword (no-field) item → for covering line 295-296
+        let mut search_identifiers = HashMap::new();
+        search_identifiers.insert(
+            "selection".to_string(),
+            SearchIdentifier::MapList(vec![
+                vec![
+                    DetectionItem {
+                        field: None,
+                        modifiers: vec![],
+                        values: vec![SigmaValue::String(SigmaString::from_literal("keyword"))],
+                    },
+                ],
+            ]),
+        );
+        SigmaRule {
+            title: "Test".to_string(),
+            id: None, name: None, related: vec![], taxonomy: None,
+            status: None, description: None, license: None, references: vec![],
+            author: None, date: None, modified: None,
+            logsource: LogSource {
+                category: Some("test".to_string()),
+                product: None, service: None, custom: HashMap::new(),
+            },
+            detection: Detection {
+                search_identifiers,
+                conditions: vec![ConditionExpression::Identifier("selection".to_string())],
+            },
+            fields: vec![], falsepositives: vec![], level: None,
+            tags: vec![], scope: vec![], custom: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_field_name_mapping_maplist_keyword() {
+        // MapList with a no-field (keyword) entry → covers lines 295-296
+        let yaml = r#"
+name: Test
+transformations:
+  - id: map
+    type: field_name_mapping
+    mapping:
+      EventID:
+        - event_id
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule_with_maplist_keyword();
+        pipeline.apply(&mut rule).unwrap();
+        let sel = &rule.detection.search_identifiers["selection"];
+        if let SearchIdentifier::MapList(maps) = sel {
+            assert_eq!(maps[0][0].field, None); // keyword preserved
         } else {
             panic!("Expected MapList");
         }
