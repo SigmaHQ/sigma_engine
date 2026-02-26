@@ -934,7 +934,7 @@ detection:
     }
 
     #[test]
-    fn parse_value_as_string_number_and_bool() {
+    fn parse_invalid_numeric_date_format_error() {
         // Numeric date triggers value_as_string for numbers
         let yaml = r#"
 title: Numeric Date

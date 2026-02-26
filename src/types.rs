@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn sigma_value_deserialize_float_and_bool() {
+    fn sigma_value_deserialize_all_types() {
         let float_val: SigmaValue = serde_yaml::from_str("3.14").unwrap();
         assert!(matches!(float_val, SigmaValue::Float(f) if (f - 3.14).abs() < 0.001));
 

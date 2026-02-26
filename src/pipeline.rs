@@ -2395,7 +2395,7 @@ transformations:
     }
 
     #[test]
-    fn test_expand_value_placeholder_empty_var() {
+    fn test_expand_value_placeholder_empty_var_error() {
         let yaml = r#"
 name: Test
 vars:
