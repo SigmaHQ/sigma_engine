@@ -1,7 +1,7 @@
 //! # Sigma Engine
 //!
 //! A Rust library for parsing [Sigma](https://sigmahq.io) detection and correlation rules
-//! from YAML.
+//! from YAML and matching them against log events in a multithreaded environment.
 //!
 //! ## Supported specifications
 //!
@@ -12,7 +12,19 @@
 //! - **Extended Correlation Conditions** (SEP #198) — boolean condition expressions in
 //!   `temporal` / `temporal_ordered` correlations referencing rule names.
 //!
+//! ## Features
+//!
+//! - **Rule Parsing**: Parse Sigma rules from YAML into structured Rust types
+//! - **Rule Matching**: Compile Sigma rules into efficient matchers that can match events
+//! - **Modifier Support**: Full support for Sigma modifiers (contains, startswith, endswith, 
+//!   regex, base64, utf16, wildcards, numeric comparisons, and more)
+//! - **Multithreaded Processing**: Process log events using multiple threads with message passing
+//! - **Log Source Matching**: Automatic dispatching of events to matching rules based on log source
+//! - **Multiple Input Formats**: Support for JSON, plain text, and Field="Value" formats
+//!
 //! ## Quick start
+//!
+//! ### Parsing a Sigma rule
 //!
 //! ```rust
 //! use sigma_engine::{SigmaCollection, SigmaDocument};
@@ -36,16 +48,102 @@
 //!     _ => panic!("Expected a detection rule"),
 //! }
 //! ```
+//!
+//! ### Matching events against rules
+//!
+//! ```rust
+//! use sigma_engine::{SigmaCollection, SigmaDocument, SigmaRuleMatcher};
+//! use std::collections::HashMap;
+//!
+//! let yaml = r#"
+//! title: Suspicious Command
+//! logsource:
+//!     category: process_creation
+//!     product: windows
+//! detection:
+//!     selection:
+//!         Image|endswith: '\cmd.exe'
+//!         CommandLine|contains: 'whoami'
+//!     condition: selection
+//! "#;
+//!
+//! let collection = SigmaCollection::from_yaml(yaml).unwrap();
+//! let rule = match &collection.documents[0] {
+//!     SigmaDocument::Rule(r) => r.clone(),
+//!     _ => panic!("Expected rule"),
+//! };
+//!
+//! let matcher = SigmaRuleMatcher::new(rule).unwrap();
+//!
+//! let mut event = HashMap::new();
+//! event.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+//! event.insert("CommandLine".to_string(), "cmd.exe /c whoami".to_string());
+//!
+//! assert!(matcher.matches(&event));
+//! ```
+//!
+//! ### Processing events with multithreading
+//!
+//! ```rust
+//! use sigma_engine::{SigmaCollection, SigmaDocument, LogProcessor, LogEvent, LogSource};
+//! use std::collections::HashMap;
+//!
+//! let yaml = r#"
+//! title: Test Rule
+//! logsource:
+//!     product: windows
+//!     category: process_creation
+//! detection:
+//!     selection:
+//!         EventID: 4688
+//!     condition: selection
+//! "#;
+//!
+//! let collection = SigmaCollection::from_yaml(yaml).unwrap();
+//! let rule = match &collection.documents[0] {
+//!     SigmaDocument::Rule(r) => r.clone(),
+//!     _ => panic!("Expected rule"),
+//! };
+//!
+//! // Create processor with rules
+//! let processor = LogProcessor::new(vec![rule]).unwrap();
+//!
+//! // Start processing (returns channels for input/output)
+//! let (event_tx, detection_rx) = processor.start();
+//!
+//! // Create and send an event
+//! let log_source = LogSource {
+//!     category: Some("process_creation".to_string()),
+//!     product: Some("windows".to_string()),
+//!     service: None,
+//! };
+//!
+//! let mut data = HashMap::new();
+//! data.insert("EventID".to_string(), "4688".to_string());
+//! let event = LogEvent::from_fields(log_source, data);
+//!
+//! event_tx.send(event).unwrap();
+//! drop(event_tx); // Signal completion
+//!
+//! // Receive detections
+//! if let Ok(detection) = detection_rx.recv() {
+//!     println!("Rule matched: {}", detection.rule.title);
+//! }
+//! ```
 
 pub mod condition;
 pub mod error;
 mod parser;
 pub mod pipeline;
 pub mod types;
+pub mod matcher;
+pub mod processor;
 
 pub use error::Error;
 pub use pipeline::*;
 pub use types::*;
+pub use matcher::SigmaRuleMatcher;
+pub use processor::{LogProcessor, Detection, LogEvent};
 
 // Re-export chrono's NaiveDate for date field access
 pub use chrono::NaiveDate;
@@ -1512,7 +1610,6 @@ custom_field: hello
         assert_eq!(rule.scope, vec!["server"]);
         assert_eq!(rule.related[0].relation_type, RelationType::Similar);
         assert_eq!(rule.logsource.service.as_deref(), Some("sysmon"));
-        assert!(!rule.logsource.custom.is_empty());
         assert!(rule.custom.contains_key("custom_field"));
         assert!(rule.date.is_some());
         assert!(rule.modified.is_some());

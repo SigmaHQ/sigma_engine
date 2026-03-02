@@ -76,8 +76,6 @@ pub struct LogSource {
     pub category: Option<String>,
     pub product: Option<String>,
     pub service: Option<String>,
-    /// Additional custom key-value pairs beyond the standard fields.
-    pub custom: HashMap<String, String>,
 }
 
 // ─── Value Modifiers ─────────────────────────────────────────────────────────

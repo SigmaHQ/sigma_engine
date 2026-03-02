@@ -632,21 +632,11 @@ fn parse_logsource(value: &Value) -> Result<LogSource, Error> {
         message: "Must be a mapping".into(),
     })?;
 
-    let known = ["category", "product", "service"];
-    let mut custom = HashMap::new();
-    for (k, v) in map {
-        if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
-            if !known.contains(&ks) {
-                custom.insert(ks.to_string(), vs.to_string());
-            }
-        }
-    }
-
+    // Simply ignore any extra attributes beyond category, product, and service
     Ok(LogSource {
         category: get_string(map, "category"),
         product: get_string(map, "product"),
         service: get_string(map, "service"),
-        custom,
     })
 }
 
