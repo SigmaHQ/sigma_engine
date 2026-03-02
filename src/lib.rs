@@ -1610,7 +1610,6 @@ custom_field: hello
         assert_eq!(rule.scope, vec!["server"]);
         assert_eq!(rule.related[0].relation_type, RelationType::Similar);
         assert_eq!(rule.logsource.service.as_deref(), Some("sysmon"));
-        assert!(!rule.logsource.custom.is_empty());
         assert!(rule.custom.contains_key("custom_field"));
         assert!(rule.date.is_some());
         assert!(rule.modified.is_some());

@@ -232,12 +232,12 @@ impl ProcessingItem {
                                         variant.push(item.clone());
                                     }
                                 }
-                            } else {
+            } else {
                                 // No field (keyword search): keep original in all variants
                                 for variant in &mut mapped_variants {
                                     variant.push(item.clone());
                                 }
-                            }
+            }
                         }
                         
                         if needs_multi_mapping {
@@ -296,7 +296,7 @@ impl ProcessingItem {
                                         variant.push(item.clone());
                                     }
                                 }
-                            }
+            }
                             
                             new_maps.extend(map_variants);
                         }
@@ -324,7 +324,7 @@ impl ProcessingItem {
                                 if self.check_field_conditions(field) {
                                     *field = format!("{}{}", prefix, field);
                                 }
-                            }
+            }
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
@@ -335,7 +335,7 @@ impl ProcessingItem {
                                         *field = format!("{}{}", prefix, field);
                                     }
                                 }
-                            }
+            }
                         }
                     }
                 }
@@ -354,7 +354,7 @@ impl ProcessingItem {
                                 if self.check_field_conditions(field) {
                                     *field = format!("{}{}", field, suffix);
                                 }
-                            }
+            }
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
@@ -365,7 +365,7 @@ impl ProcessingItem {
                                         *field = format!("{}{}", field, suffix);
                                     }
                                 }
-                            }
+            }
                         }
                     }
                 }
@@ -392,7 +392,7 @@ impl ProcessingItem {
                                 field: Some(field.clone()),
                                 modifiers: vec![],
                                 values: vec![value.clone()],
-                            });
+            });
                         }
                     }
                 }
@@ -436,7 +436,7 @@ impl ProcessingItem {
                                 if self.check_field_conditions(field) {
                                     self.replace_in_values(&mut item.values, &re, replacement);
                                 }
-                            }
+            }
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
@@ -447,7 +447,7 @@ impl ProcessingItem {
                                         self.replace_in_values(&mut item.values, &re, replacement);
                                     }
                                 }
-                            }
+            }
                         }
                     }
                 }
@@ -482,7 +482,7 @@ impl ProcessingItem {
                                 if self.check_field_conditions(field) {
                                     self.map_string_values(&mut item.values, mapping);
                                 }
-                            }
+            }
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
@@ -493,7 +493,7 @@ impl ProcessingItem {
                                         self.map_string_values(&mut item.values, mapping);
                                     }
                                 }
-                            }
+            }
                         }
                     }
                 }
@@ -531,7 +531,7 @@ impl ProcessingItem {
                                 field: Some(field.clone()),
                                 modifiers: vec![],
                                 values: vec![value.clone()],
-                            });
+            });
                         }
                     }
                     SearchIdentifier::MapList(maps) => {
@@ -542,7 +542,7 @@ impl ProcessingItem {
                                     modifiers: vec![],
                                     values: vec![value.clone()],
                                 });
-                            }
+            }
                         }
                     }
                 }
@@ -566,7 +566,7 @@ impl ProcessingItem {
                         for items in maps {
                             for item in items {
                                 Self::apply_prefix_mapping_to_item(item, mapping);
-                            }
+            }
                         }
                     }
                 }
@@ -692,7 +692,7 @@ impl ProcessingItem {
                         if let SigmaStringPart::Placeholder(name) = part {
                             if self.is_handled_placeholder(name) {
                                 return SigmaStringPart::WildcardMulti;
-                            }
+            }
                         }
                         part.clone()
                     }).collect();
@@ -966,7 +966,6 @@ mod tests {
                 category: Some("process_creation".to_string()),
                 product: Some("windows".to_string()),
                 service: None,
-                custom: HashMap::new(),
             },
             detection: Detection {
                 search_identifiers,
@@ -1561,7 +1560,6 @@ transformations:
                 category: Some("process_creation".to_string()),
                 product: Some("windows".to_string()),
                 service: None,
-                custom: HashMap::new(),
             },
             detection: Detection {
                 search_identifiers,
@@ -1919,7 +1917,6 @@ transformations:
                 category: Some("process_creation".to_string()),
                 product: Some("windows".to_string()),
                 service: Some("sysmon".to_string()),
-                custom: HashMap::new(),
             },
             detection: Detection {
                 search_identifiers,
@@ -2004,7 +2001,7 @@ transformations:
             author: None, date: None, modified: None,
             logsource: LogSource {
                 category: Some("test".to_string()),
-                product: None, service: None, custom: HashMap::new(),
+                product: None, service: None,
             },
             detection: Detection {
                 search_identifiers,
@@ -2058,7 +2055,7 @@ transformations:
             author: None, date: None, modified: None,
             logsource: LogSource {
                 category: Some("test".to_string()),
-                product: None, service: None, custom: HashMap::new(),
+                product: None, service: None,
             },
             detection: Detection {
                 search_identifiers,
@@ -2343,7 +2340,7 @@ transformations:
             title: "T".into(), id: None, name: None, related: vec![], taxonomy: None,
             status: None, description: None, license: None, references: vec![],
             author: None, date: None, modified: None,
-            logsource: LogSource { category: None, product: None, service: None, custom: HashMap::new() },
+            logsource: LogSource { category: None, product: None, service: None },
             detection: Detection { search_identifiers, conditions: vec![ConditionExpression::Identifier("sel".into())] },
             fields: vec![], falsepositives: vec![], level: None, tags: vec![], scope: vec![], custom: HashMap::new(),
         };
@@ -2382,7 +2379,7 @@ transformations:
             title: "T".into(), id: None, name: None, related: vec![], taxonomy: None,
             status: None, description: None, license: None, references: vec![],
             author: None, date: None, modified: None,
-            logsource: LogSource { category: None, product: None, service: None, custom: HashMap::new() },
+            logsource: LogSource { category: None, product: None, service: None },
             detection: Detection { search_identifiers, conditions: vec![ConditionExpression::Identifier("sel".into())] },
             fields: vec![], falsepositives: vec![], level: None, tags: vec![], scope: vec![], custom: HashMap::new(),
         };
