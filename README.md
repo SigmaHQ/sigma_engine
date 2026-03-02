@@ -111,7 +111,6 @@ let log_source = LogSource {
     category: Some("process_creation".to_string()),
     product: Some("windows".to_string()),
     service: None,
-    custom: HashMap::new(),
 };
 
 // Send JSON event
@@ -148,44 +147,6 @@ let event = LogEvent::from_plain(log_source, text);
 ```rust
 let text = r#"EventID="4688" User="SYSTEM" CommandLine="cmd.exe""#;
 let event = LogEvent::from_field_value_format(log_source, text);
-```
-
-## Advanced Modifiers
-
-### base64offset
-
-The `base64offset` modifier generates three Base64-encoded variants of a string with different byte alignments (offsets 0, 1, and 2). This is crucial for detecting base64-encoded payloads that may appear at any byte boundary in a data stream.
-
-```yaml
-detection:
-  selection:
-    CommandLine|base64offset|contains: 'Invoke-WebRequest'
-```
-
-This will match base64-encoded "Invoke-WebRequest" regardless of byte alignment in the command line.
-
-### windash
-
-The `windash` modifier generates all permutations of dash characters, making it easy to detect Windows command-line flags that can use multiple dash character variants:
-
-```yaml
-detection:
-  selection:
-    CommandLine|windash|contains: '-addstore'
-```
-
-This will match any of: `-addstore`, `/addstore`, `–addstore` (en-dash), `—addstore` (em-dash), or `―addstore` (horizontal bar).
-
-### Modifier Chaining
-
-Modifiers can be chained for powerful detection capabilities:
-
-```yaml
-# Detect UTF-16LE encoded, base64-encoded strings with any offset
-CommandLine|wide|base64offset|contains: 'malicious'
-
-# Detect all dash variants with case-sensitive matching
-CommandLine|windash|cased|contains: '-Flag'
 ```
 
 ## Threading Model
