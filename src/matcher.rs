@@ -1633,5 +1633,864 @@ detection:
         event2.insert("CommandLine".to_string(), "prefix QAZQBzAHQA suffix".to_string());
         assert!(matcher.matches(&event2));
     }
+
+    #[test]
+    fn test_matcher_or_condition() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    sel1:
+        EventID: 4688
+    sel2:
+        EventID: 4689
+    condition: sel1 or sel2
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4688".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4689".to_string());
+        assert!(matcher.matches(&event2));
+
+        let mut event3 = HashMap::new();
+        event3.insert("EventID".to_string(), "9999".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_all_of_them() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    sel1:
+        EventID: 4688
+    sel2:
+        Image|endswith: '\cmd.exe'
+    condition: all of them
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4688".to_string());
+        event1.insert("Image".to_string(), "C:\\Windows\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        // Only one matches
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4688".to_string());
+        event2.insert("Image".to_string(), "notepad.exe".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_all_of_pattern() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    sel_id:
+        EventID: 4688
+    sel_img:
+        Image|endswith: '\cmd.exe'
+    condition: all of sel*
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4688".to_string());
+        event1.insert("Image".to_string(), "C:\\Windows\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        // Only one matches
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4688".to_string());
+        event2.insert("Image".to_string(), "notepad.exe".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_maplist_detection() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        - EventID: 4688
+          Image|endswith: '\cmd.exe'
+        - EventID: 4689
+          Image|endswith: '\powershell.exe'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // First map matches
+        let mut event1 = HashMap::new();
+        event1.insert("EventID".to_string(), "4688".to_string());
+        event1.insert("Image".to_string(), "C:\\Windows\\cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        // Second map matches
+        let mut event2 = HashMap::new();
+        event2.insert("EventID".to_string(), "4689".to_string());
+        event2.insert("Image".to_string(), "C:\\Windows\\powershell.exe".to_string());
+        assert!(matcher.matches(&event2));
+
+        // Neither matches (wrong combo)
+        let mut event3 = HashMap::new();
+        event3.insert("EventID".to_string(), "4688".to_string());
+        event3.insert("Image".to_string(), "C:\\Windows\\powershell.exe".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_int_value() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count: 42
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Count".to_string(), "42".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Count".to_string(), "99".to_string());
+        assert!(!matcher.matches(&event2));
+
+        // Non-parseable number should not match
+        let mut event3 = HashMap::new();
+        event3.insert("Count".to_string(), "abc".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_float_value() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Score: 3.14
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Score".to_string(), "3.14".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Score".to_string(), "2.71".to_string());
+        assert!(!matcher.matches(&event2));
+
+        let mut event3 = HashMap::new();
+        event3.insert("Score".to_string(), "abc".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_float_comparisons() {
+        // lt
+        let yaml_lt = r#"
+title: Test
+logsource:
+    product: test
+detection:
+    selection:
+        Score|lt: 5.0
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml_lt).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+        let mut event = HashMap::new();
+        event.insert("Score".to_string(), "3.0".to_string());
+        assert!(matcher.matches(&event));
+        event.insert("Score".to_string(), "7.0".to_string());
+        assert!(!matcher.matches(&event));
+
+        // lte
+        let yaml_lte = r#"
+title: Test
+logsource:
+    product: test
+detection:
+    selection:
+        Score|lte: 5.0
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml_lte).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+        let mut event = HashMap::new();
+        event.insert("Score".to_string(), "5.0".to_string());
+        assert!(matcher.matches(&event));
+        event.insert("Score".to_string(), "6.0".to_string());
+        assert!(!matcher.matches(&event));
+
+        // gt
+        let yaml_gt = r#"
+title: Test
+logsource:
+    product: test
+detection:
+    selection:
+        Score|gt: 5.0
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml_gt).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+        let mut event = HashMap::new();
+        event.insert("Score".to_string(), "7.0".to_string());
+        assert!(matcher.matches(&event));
+        event.insert("Score".to_string(), "3.0".to_string());
+        assert!(!matcher.matches(&event));
+
+        // gte
+        let yaml_gte = r#"
+title: Test
+logsource:
+    product: test
+detection:
+    selection:
+        Score|gte: 5.0
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml_gte).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+        let mut event = HashMap::new();
+        event.insert("Score".to_string(), "5.0".to_string());
+        assert!(matcher.matches(&event));
+        event.insert("Score".to_string(), "4.0".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_bool_pattern() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Enabled: true
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Enabled".to_string(), "true".to_string());
+        assert!(matcher.matches(&event));
+
+        event.insert("Enabled".to_string(), "false".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_null_pattern() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Field: null
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Field".to_string(), "".to_string());
+        assert!(matcher.matches(&event));
+
+        event.insert("Field".to_string(), "null".to_string());
+        assert!(matcher.matches(&event));
+
+        event.insert("Field".to_string(), "something".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_keyword_search() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    keywords:
+        - '*suspicious*'
+        - '*malware*'
+    condition: keywords
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Field1".to_string(), "this is suspicious activity".to_string());
+        assert!(matcher.matches(&event));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Field1".to_string(), "normal activity".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_missing_field() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        NonExistentField: 'value'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("OtherField".to_string(), "value".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_missing_search_identifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        EventID: 4688
+    condition: missing_identifier
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("EventID".to_string(), "4688".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_wildcard_single_char() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Image: 'cmd.ex?'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event1 = HashMap::new();
+        event1.insert("Image".to_string(), "cmd.exe".to_string());
+        assert!(matcher.matches(&event1));
+
+        let mut event2 = HashMap::new();
+        event2.insert("Image".to_string(), "cmd.exa".to_string());
+        assert!(matcher.matches(&event2));
+
+        // ? requires exactly one char
+        let mut event3 = HashMap::new();
+        event3.insert("Image".to_string(), "cmd.ex".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    #[test]
+    fn test_matcher_regex_multiline_flag() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|re|m: '^start'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "prefix\nstart of new line".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_regex_dotall_flag() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|re|s: 'start.*end'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "start\nmiddle\nend".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_regex_invalid() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|re: '[invalid'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "test".to_string());
+        // Invalid regex should not match
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_utf16be_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|utf16be|contains: 'A'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // "A" in UTF-16BE is "\x00A"
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "prefix \x00A suffix".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_base64offset_with_utf16be() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|utf16be|base64offset|contains: 'A'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        // Should compile without error
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // UTF-16BE "A" = [0x00, 0x41]
+        // Offset 0: base64([0x00, 0x41]) = "AEE=" -> skip 0 -> "AEE="
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "prefix AEE= suffix".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_base64offset_startswith() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|base64offset|startswith: 'test'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let _matcher = SigmaRuleMatcher::new(rule).unwrap();
+    }
+
+    #[test]
+    fn test_matcher_base64offset_endswith() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|base64offset|endswith: 'test'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let _matcher = SigmaRuleMatcher::new(rule).unwrap();
+    }
+
+    #[test]
+    fn test_matcher_one_of_them_no_match() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    sel1:
+        EventID: 4688
+    sel2:
+        EventID: 4689
+    condition: 1 of them
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("EventID".to_string(), "9999".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_all_of_them_empty_non_underscore() {
+        // All search identifiers start with _ (should return false for all of them)
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    _filter:
+        EventID: 4688
+    condition: all of them
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("EventID".to_string(), "4688".to_string());
+        // Should return false since no non-underscore-prefixed identifiers exist
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_one_of_pattern_no_match() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    sel_a:
+        EventID: 4688
+    other_b:
+        EventID: 4689
+    condition: 1 of sel*
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("EventID".to_string(), "9999".to_string());
+        // sel_a doesn't match, other_b is not in pattern
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_all_of_pattern_no_match_pattern() {
+        // Test all of pattern* where no identifiers match the pattern
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    other_a:
+        EventID: 4688
+    condition: all of sel*
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("EventID".to_string(), "4688".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_exists_false() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Field|exists: false
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Field does not exist - should match exists:false
+        let mut event1 = HashMap::new();
+        event1.insert("Other".to_string(), "val".to_string());
+        assert!(matcher.matches(&event1));
+
+        // Field exists - should not match exists:false
+        let mut event2 = HashMap::new();
+        event2.insert("Field".to_string(), "val".to_string());
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_matcher_windash_with_expansion_re() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|windash|re: 'test-data'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "test/data".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_windash_no_dash() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|windash|contains: 'nodash'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "prefix nodash suffix".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_windash_exact() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Data|windash: 'test-val'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Data".to_string(), "test/val".to_string());
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_base64offset_non_string_value() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count|base64offset: 42
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = HashMap::new();
+        event.insert("Count".to_string(), "42".to_string());
+        assert!(matcher.matches(&event));
+    }
 }
 

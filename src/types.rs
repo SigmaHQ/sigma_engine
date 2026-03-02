@@ -637,4 +637,21 @@ mod tests {
             "all of sel*"
         );
     }
+
+    #[test]
+    fn level_display_all() {
+        assert_eq!(Level::Informational.to_string(), "informational");
+        assert_eq!(Level::Low.to_string(), "low");
+        assert_eq!(Level::Medium.to_string(), "medium");
+        assert_eq!(Level::High.to_string(), "high");
+        assert_eq!(Level::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn sigma_value_deserialize_invalid_sequence() {
+        // A YAML sequence cannot be deserialized as a SigmaValue
+        let yaml = "- a\n- b";
+        let result: std::result::Result<SigmaValue, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
 }

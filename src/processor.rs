@@ -597,4 +597,160 @@ detection:
         assert_eq!(fields.get("EventID"), Some(&"4688".to_string()));
         assert_eq!(fields.get("User"), Some(&"SYSTEM".to_string()));
     }
+
+    #[test]
+    fn test_log_event_from_json_nested() {
+        let log_source = LogSource {
+            category: Some("test".to_string()),
+            product: None,
+            service: None,
+        };
+
+        let json = r#"{"outer": {"inner": "value"}, "arr": [1, 2, 3]}"#;
+        let event = LogEvent::from_json(log_source, json).unwrap();
+
+        assert_eq!(event.data.get("outer.inner"), Some(&"value".to_string()));
+        assert_eq!(event.data.get("arr"), Some(&"1,2,3".to_string()));
+    }
+
+    #[test]
+    fn test_json_value_to_string_types() {
+        // Bool
+        assert_eq!(
+            LogEvent::json_value_to_string(&serde_json::json!(true)),
+            "true"
+        );
+        // Null
+        assert_eq!(
+            LogEvent::json_value_to_string(&serde_json::json!(null)),
+            ""
+        );
+        // Number
+        assert_eq!(
+            LogEvent::json_value_to_string(&serde_json::json!(42)),
+            "42"
+        );
+        // Array (other)
+        let arr = serde_json::json!([1, 2]);
+        let result = LogEvent::json_value_to_string(&arr);
+        assert!(result.contains('1'));
+    }
+
+    #[test]
+    fn test_parse_field_value_escape_sequences() {
+        let text = r#"Field="line1\nline2\ttab\\backslash\rcarriage\"quote"#;
+        let fields = LogEvent::parse_field_value_format(text);
+        assert_eq!(
+            fields.get("Field"),
+            Some(&"line1\nline2\ttab\\backslash\rcarriage\"quote".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_field_value_unknown_escape() {
+        let text = r#"Field="test\xvalue""#;
+        let fields = LogEvent::parse_field_value_format(text);
+        assert_eq!(fields.get("Field"), Some(&"test\\xvalue".to_string()));
+    }
+
+    #[test]
+    fn test_parse_field_value_double_quote_in_value() {
+        let text = r#"Field="value""quoted""#;
+        let fields = LogEvent::parse_field_value_format(text);
+        assert_eq!(fields.get("Field"), Some(&"value\"quoted".to_string()));
+    }
+
+    #[test]
+    fn test_parse_field_value_whitespace_after_equals() {
+        let text = r#"Field= value"#;
+        let fields = LogEvent::parse_field_value_format(text);
+        assert_eq!(fields.get("Field"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_log_source_matches_service() {
+        let rule_source = LogSource {
+            category: None,
+            product: None,
+            service: Some("security".to_string()),
+        };
+
+        let event_source1 = LogSource {
+            category: None,
+            product: None,
+            service: Some("security".to_string()),
+        };
+        assert!(LogProcessor::log_source_matches(&event_source1, &rule_source));
+
+        let event_source2 = LogSource {
+            category: None,
+            product: None,
+            service: Some("application".to_string()),
+        };
+        assert!(!LogProcessor::log_source_matches(&event_source2, &rule_source));
+
+        let event_source3 = LogSource {
+            category: None,
+            product: None,
+            service: None,
+        };
+        assert!(!LogProcessor::log_source_matches(&event_source3, &rule_source));
+    }
+
+    #[test]
+    fn test_log_source_matches_category_none() {
+        let rule_source = LogSource {
+            category: Some("process_creation".to_string()),
+            product: None,
+            service: None,
+        };
+
+        let event_source = LogSource {
+            category: None,
+            product: None,
+            service: None,
+        };
+        assert!(!LogProcessor::log_source_matches(&event_source, &rule_source));
+    }
+
+    #[test]
+    fn test_processor_with_config() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        EventID: 1234
+    condition: selection
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            crate::SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let config = ProcessorConfig {
+            num_threads: 1,
+            event_buffer_size: 0,
+            detection_buffer_size: 0,
+        };
+
+        let processor = LogProcessor::with_config(vec![rule], config).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        let log_source = LogSource {
+            category: None,
+            product: Some("test".to_string()),
+            service: None,
+        };
+        let mut data = HashMap::new();
+        data.insert("EventID".to_string(), "1234".to_string());
+        let event = LogEvent::from_fields(log_source, data);
+        event_tx.send(event).unwrap();
+        drop(event_tx);
+
+        let detection = detection_rx.recv().unwrap();
+        assert_eq!(detection.rule.title, "Test Rule");
+    }
 }
