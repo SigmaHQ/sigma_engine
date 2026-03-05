@@ -64,6 +64,7 @@
 //! processes events from a shared channel and outputs detections to another channel.
 //! This allows for efficient parallel processing of high-volume log streams.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -71,7 +72,7 @@ use std::thread;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use serde_json::Value as JsonValue;
 
-use crate::matcher::SigmaRuleMatcher;
+use crate::matcher::{Event, SigmaRuleMatcher};
 use crate::types::{LogSource, SigmaRule};
 
 /// A log event that can be matched against Sigma rules.
@@ -262,6 +263,31 @@ impl LogEvent {
     }
 }
 
+/// [`Event`] implementation for [`LogEvent`].
+///
+/// When the event was created with a raw string (e.g. from [`LogEvent::from_json`] or
+/// [`LogEvent::from_plain`]) the raw string is returned directly for keyword matching.
+/// Otherwise the field values are joined with a single space, which replicates the
+/// previous behaviour of the engine.
+impl Event for LogEvent {
+    fn get_field(&self, field: &str) -> Option<&str> {
+        self.data.get(field).map(String::as_str)
+    }
+
+    fn has_field(&self, field: &str) -> bool {
+        self.data.contains_key(field)
+    }
+
+    fn raw(&self) -> Cow<'_, str> {
+        match &self.raw {
+            Some(r) => Cow::Borrowed(r.as_str()),
+            None => Cow::Owned(
+                self.data.values().map(String::as_str).collect::<Vec<_>>().join(" ")
+            ),
+        }
+    }
+}
+
 /// A detection result when a Sigma rule matches an event.
 #[derive(Debug, Clone)]
 pub struct Detection {
@@ -377,7 +403,7 @@ impl LogProcessor {
             // Try each matcher that matches the log source
             for matcher in &matchers {
                 if Self::log_source_matches(&event.log_source, &matcher.rule.logsource) {
-                    if matcher.matches(&event.data) {
+                    if matcher.matches(&event) {
                         let detection = Detection {
                             rule: matcher.rule.clone(),
                             event: event.clone(),
@@ -752,5 +778,55 @@ detection:
 
         let detection = detection_rx.recv().unwrap();
         assert_eq!(detection.rule.title, "Test Rule");
+    }
+
+    #[test]
+    fn test_log_event_raw_used_for_keyword_matching() {
+        // LogEvent::from_json stores the raw JSON string; keyword matching should
+        // search that raw string rather than just the parsed field values.
+        let yaml = r#"
+title: Keyword Rule
+logsource:
+    product: test
+detection:
+    keywords:
+        - '*sensitive_token*'
+    condition: keywords
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            crate::SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = crate::SigmaRuleMatcher::new(rule).unwrap();
+
+        let log_source = LogSource { category: None, product: Some("test".to_string()), service: None };
+
+        // The raw JSON contains the token in a key name that the parsed fields don't expose
+        let json = r#"{"sensitive_token": "some_value"}"#;
+        let event_with_raw = LogEvent::from_json(log_source.clone(), json).unwrap();
+        assert!(matcher.matches(&event_with_raw));
+
+        // Without raw, only field values are searched
+        let mut data = HashMap::new();
+        data.insert("other_field".to_string(), "no match here".to_string());
+        let event_no_raw = LogEvent::from_fields(log_source, data);
+        assert!(!matcher.matches(&event_no_raw));
+    }
+
+    #[test]
+    fn test_log_event_raw_returns_raw_string_when_available() {
+        use crate::Event;
+
+        let log_source = LogSource { category: None, product: None, service: None };
+        let json = r#"{"key": "value"}"#;
+        let event = LogEvent::from_json(log_source.clone(), json).unwrap();
+        assert_eq!(event.raw().as_ref(), json);
+
+        let mut data = HashMap::new();
+        data.insert("k".to_string(), "v".to_string());
+        let event_no_raw = LogEvent::from_fields(log_source, data);
+        // Falls back to joined field values
+        assert_eq!(event_no_raw.raw().as_ref(), "v");
     }
 }
