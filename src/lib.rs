@@ -142,7 +142,7 @@ pub mod processor;
 pub use error::Error;
 pub use pipeline::*;
 pub use types::*;
-pub use matcher::SigmaRuleMatcher;
+pub use matcher::{SigmaRuleMatcher, Event};
 pub use processor::{LogProcessor, Detection, LogEvent};
 
 // Re-export chrono's NaiveDate for date field access
