@@ -49,6 +49,7 @@
 //! `SigmaRuleMatcher` is thread-safe and uses `Arc` internally for efficient sharing
 //! across threads.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -59,8 +60,109 @@ use crate::error::{Error, Result};
 use crate::types::*;
 
 // Cache for compiled regex patterns
-static REGEX_CACHE: Lazy<Mutex<HashMap<String, std::result::Result<Regex, String>>>> = 
+static REGEX_CACHE: Lazy<Mutex<HashMap<String, std::result::Result<Regex, String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// A trait for types that can be used as events in Sigma rule matching.
+///
+/// Implement this trait to allow [`SigmaRuleMatcher::matches`] to operate on
+/// arbitrary event representations beyond a plain `HashMap<String, String>`.
+///
+/// # Examples
+///
+/// Implementing `Event` for a custom struct:
+///
+/// ```rust
+/// use sigma_engine::Event;
+/// use std::borrow::Cow;
+/// use std::collections::HashMap;
+///
+/// struct MyEvent {
+///     fields: HashMap<String, String>,
+///     raw_line: Option<String>,
+/// }
+///
+/// impl Event for MyEvent {
+///     fn get_field(&self, field: &str) -> Option<&str> {
+///         self.fields.get(field).map(String::as_str)
+///     }
+///
+///     fn has_field(&self, field: &str) -> bool {
+///         self.fields.contains_key(field)
+///     }
+///
+///     fn raw(&self) -> Cow<'_, str> {
+///         match &self.raw_line {
+///             Some(r) => Cow::Borrowed(r.as_str()),
+///             None => Cow::Owned(
+///                 self.fields.values().map(String::as_str).collect::<Vec<_>>().join(" ")
+///             ),
+///         }
+///     }
+/// }
+/// ```
+pub trait Event {
+    /// Return the value of a named field, or `None` if the field does not exist.
+    fn get_field(&self, field: &str) -> Option<&str>;
+
+    /// Return `true` if the named field is present in the event.
+    fn has_field(&self, field: &str) -> bool;
+
+    /// Return the raw string representation of the event.
+    ///
+    /// This is used for keyword (field-less) detection items.  When the event
+    /// has a pre-existing raw log line that representation is returned directly
+    /// (borrowed).  If no raw representation is available, an owned string is
+    /// built by joining all field values with a single space, which preserves
+    /// the original behaviour of the library.
+    fn raw(&self) -> Cow<'_, str>;
+}
+
+/// Blanket [`Event`] implementation for `HashMap<String, String>`.
+///
+/// This keeps all existing call-sites that pass a plain hash-map working
+/// without any changes.
+///
+/// # Examples
+///
+/// ```rust
+/// use sigma_engine::{SigmaCollection, SigmaDocument, SigmaRuleMatcher};
+/// use std::collections::HashMap;
+///
+/// let yaml = r#"
+/// title: Test
+/// logsource:
+///     product: test
+/// detection:
+///     sel:
+///         Field: value
+///     condition: sel
+/// "#;
+///
+/// let collection = SigmaCollection::from_yaml(yaml).unwrap();
+/// let rule = match &collection.documents[0] {
+///     SigmaDocument::Rule(r) => r.clone(),
+///     _ => panic!("Expected rule"),
+/// };
+/// let matcher = SigmaRuleMatcher::new(rule).unwrap();
+///
+/// let mut event = HashMap::new();
+/// event.insert("Field".to_string(), "value".to_string());
+/// assert!(matcher.matches(&event));
+/// ```
+impl Event for HashMap<String, String> {
+    fn get_field(&self, field: &str) -> Option<&str> {
+        self.get(field).map(String::as_str)
+    }
+
+    fn has_field(&self, field: &str) -> bool {
+        self.contains_key(field)
+    }
+
+    fn raw(&self) -> Cow<'_, str> {
+        Cow::Owned(self.values().map(String::as_str).collect::<Vec<_>>().join(" "))
+    }
+}
 
 /// A compiled matcher for a Sigma detection rule.
 ///
@@ -421,12 +523,43 @@ impl SigmaRuleMatcher {
 
     /// Match an event against this rule.
     ///
+    /// The `event` parameter can be any type that implements [`Event`], including
+    /// a plain [`std::collections::HashMap`]`<String, String>` or a custom struct.
+    ///
     /// # Arguments
-    /// * `event` - The event to match, represented as a field-value map
+    /// * `event` - The event to match
     ///
     /// # Returns
     /// `true` if the event matches any of the rule's conditions, `false` otherwise
-    pub fn matches(&self, event: &HashMap<String, String>) -> bool {
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use sigma_engine::{SigmaCollection, SigmaDocument, SigmaRuleMatcher};
+    /// use std::collections::HashMap;
+    ///
+    /// let yaml = r#"
+    /// title: Test
+    /// logsource:
+    ///     product: windows
+    /// detection:
+    ///     sel:
+    ///         Image|endswith: '\cmd.exe'
+    ///     condition: sel
+    /// "#;
+    ///
+    /// let collection = SigmaCollection::from_yaml(yaml).unwrap();
+    /// let rule = match &collection.documents[0] {
+    ///     SigmaDocument::Rule(r) => r.clone(),
+    ///     _ => panic!("Expected rule"),
+    /// };
+    /// let matcher = SigmaRuleMatcher::new(rule).unwrap();
+    ///
+    /// let mut event = HashMap::new();
+    /// event.insert("Image".to_string(), r"C:\Windows\System32\cmd.exe".to_string());
+    /// assert!(matcher.matches(&event));
+    /// ```
+    pub fn matches<E: Event>(&self, event: &E) -> bool {
         // Evaluate all conditions (they are implicitly OR-connected)
         for condition in &self.rule.detection.conditions {
             if self.eval_condition(condition, event) {
@@ -437,7 +570,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate a condition expression against an event.
-    fn eval_condition(&self, expr: &ConditionExpression, event: &HashMap<String, String>) -> bool {
+    fn eval_condition<E: Event>(&self, expr: &ConditionExpression, event: &E) -> bool {
         match expr {
             ConditionExpression::Identifier(name) => {
                 self.eval_search_identifier(name, event)
@@ -467,7 +600,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate a search identifier against an event.
-    fn eval_search_identifier(&self, name: &str, event: &HashMap<String, String>) -> bool {
+    fn eval_search_identifier<E: Event>(&self, name: &str, event: &E) -> bool {
         if let Some(search) = self.compiled_searches.get(name) {
             match search {
                 CompiledSearch::Map(items) => {
@@ -489,7 +622,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate a list of detection items with AND logic.
-    fn eval_detection_items_and(&self, items: &[CompiledDetectionItem], event: &HashMap<String, String>) -> bool {
+    fn eval_detection_items_and<E: Event>(&self, items: &[CompiledDetectionItem], event: &E) -> bool {
         for item in items {
             if !self.eval_detection_item(item, event) {
                 return false;
@@ -499,11 +632,11 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate a single detection item against an event.
-    fn eval_detection_item(&self, item: &CompiledDetectionItem, event: &HashMap<String, String>) -> bool {
+    fn eval_detection_item<E: Event>(&self, item: &CompiledDetectionItem, event: &E) -> bool {
         // Handle exists modifier
         if item.modifiers.contains(&Modifier::Exists) {
             if let Some(field) = &item.field {
-                let exists = event.contains_key(field);
+                let exists = event.has_field(field);
                 // The pattern should be a boolean indicating desired existence
                 if let Some(CompiledPattern::Bool(should_exist)) = item.patterns.first() {
                     return exists == *should_exist;
@@ -513,17 +646,17 @@ impl SigmaRuleMatcher {
         }
 
         // Get the value to match against
-        let value_to_match = if let Some(field) = &item.field {
+        let value_to_match: Cow<'_, str> = if let Some(field) = &item.field {
             // Field matching
-            if let Some(val) = event.get(field) {
-                val.clone()
+            if let Some(val) = event.get_field(field) {
+                Cow::Borrowed(val)
             } else {
                 // Field doesn't exist in event
                 return false;
             }
         } else {
-            // Keyword search - match against all field values or entire event
-            event.values().cloned().collect::<Vec<_>>().join(" ")
+            // Keyword search - use the raw event representation
+            event.raw()
         };
 
         // Check if ALL modifier is present
@@ -738,7 +871,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate "1 of them" - any non-underscore-prefixed search identifier matches.
-    fn eval_one_of_them(&self, event: &HashMap<String, String>) -> bool {
+    fn eval_one_of_them<E: Event>(&self, event: &E) -> bool {
         for name in self.compiled_searches.keys() {
             if !name.starts_with('_') && self.eval_search_identifier(name, event) {
                 return true;
@@ -748,7 +881,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate "all of them" - all non-underscore-prefixed search identifiers match.
-    fn eval_all_of_them(&self, event: &HashMap<String, String>) -> bool {
+    fn eval_all_of_them<E: Event>(&self, event: &E) -> bool {
         let mut found_any = false;
         for name in self.compiled_searches.keys() {
             if !name.starts_with('_') {
@@ -762,7 +895,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate "1 of pattern" - any matching search identifier matches.
-    fn eval_one_of_pattern(&self, pattern: &str, event: &HashMap<String, String>) -> bool {
+    fn eval_one_of_pattern<E: Event>(&self, pattern: &str, event: &E) -> bool {
         for name in self.compiled_searches.keys() {
             if self.match_identifier_pattern(name, pattern) && self.eval_search_identifier(name, event) {
                 return true;
@@ -772,7 +905,7 @@ impl SigmaRuleMatcher {
     }
 
     /// Evaluate "all of pattern" - all matching search identifiers match.
-    fn eval_all_of_pattern(&self, pattern: &str, event: &HashMap<String, String>) -> bool {
+    fn eval_all_of_pattern<E: Event>(&self, pattern: &str, event: &E) -> bool {
         let mut found_any = false;
         for name in self.compiled_searches.keys() {
             if self.match_identifier_pattern(name, pattern) {
@@ -2491,6 +2624,162 @@ detection:
         let mut event = HashMap::new();
         event.insert("Count".to_string(), "42".to_string());
         assert!(matcher.matches(&event));
+    }
+
+    // ── Event trait tests ────────────────────────────────────────────────────
+
+    /// A minimal custom event type used to verify that any type implementing
+    /// [`Event`] works with [`SigmaRuleMatcher::matches`].
+    struct CustomEvent {
+        fields: HashMap<String, String>,
+        raw_line: Option<String>,
+    }
+
+    impl Event for CustomEvent {
+        fn get_field(&self, field: &str) -> Option<&str> {
+            self.fields.get(field).map(String::as_str)
+        }
+
+        fn has_field(&self, field: &str) -> bool {
+            self.fields.contains_key(field)
+        }
+
+        fn raw(&self) -> std::borrow::Cow<'_, str> {
+            match &self.raw_line {
+                Some(r) => std::borrow::Cow::Borrowed(r.as_str()),
+                None => std::borrow::Cow::Owned(
+                    self.fields.values().map(String::as_str).collect::<Vec<_>>().join(" ")
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_custom_event_field_match() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Image|endswith: '\cmd.exe'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut fields = HashMap::new();
+        fields.insert("Image".to_string(), r"C:\Windows\System32\cmd.exe".to_string());
+        let event = CustomEvent { fields, raw_line: None };
+
+        assert!(matcher.matches(&event));
+
+        let mut fields2 = HashMap::new();
+        fields2.insert("Image".to_string(), r"C:\Windows\System32\notepad.exe".to_string());
+        let event2 = CustomEvent { fields: fields2, raw_line: None };
+        assert!(!matcher.matches(&event2));
+    }
+
+    #[test]
+    fn test_custom_event_exists_modifier() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        SomeField|exists: true
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut fields = HashMap::new();
+        fields.insert("SomeField".to_string(), "anything".to_string());
+        let event = CustomEvent { fields, raw_line: None };
+        assert!(matcher.matches(&event));
+
+        let event_missing = CustomEvent { fields: HashMap::new(), raw_line: None };
+        assert!(!matcher.matches(&event_missing));
+    }
+
+    #[test]
+    fn test_custom_event_keyword_uses_raw_when_available() {
+        let yaml = r#"
+title: Keyword Rule
+logsource:
+    product: test
+detection:
+    keywords:
+        - '*suspicious_token*'
+    condition: keywords
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // When raw is set, keyword matching uses it — even if field values don't contain the token
+        let event_with_raw = CustomEvent {
+            fields: {
+                let mut m = HashMap::new();
+                m.insert("EventID".to_string(), "1234".to_string());
+                m
+            },
+            raw_line: Some("raw log line with suspicious_token here".to_string()),
+        };
+        assert!(matcher.matches(&event_with_raw));
+
+        // Without the token in the raw string, it should not match
+        let event_without_token = CustomEvent {
+            fields: {
+                let mut m = HashMap::new();
+                m.insert("EventID".to_string(), "1234".to_string());
+                m
+            },
+            raw_line: Some("raw log line without the target".to_string()),
+        };
+        assert!(!matcher.matches(&event_without_token));
+    }
+
+    #[test]
+    fn test_custom_event_keyword_falls_back_to_field_values() {
+        let yaml = r#"
+title: Keyword Rule
+logsource:
+    product: test
+detection:
+    keywords:
+        - '*suspicious_token*'
+    condition: keywords
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // No raw string — keyword matching falls back to joined field values
+        let event_no_raw = CustomEvent {
+            fields: {
+                let mut m = HashMap::new();
+                m.insert("Data".to_string(), "value containing suspicious_token".to_string());
+                m
+            },
+            raw_line: None,
+        };
+        assert!(matcher.matches(&event_no_raw));
     }
 }
 
