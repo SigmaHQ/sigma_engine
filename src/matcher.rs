@@ -622,11 +622,13 @@ impl SigmaRuleMatcher {
         if let Some(field) = &item.field {
             // Field matching
             event.get(field).into_iter().any(|v| self.match_patterns(&item.patterns, &item.modifiers, &v))
-        } else if let Some(raw) = event.raw() {
-            // Keyword search - match against all field values or entire event
-            self.match_patterns(&item.patterns, &item.modifiers, &Value::String(Cow::Borrowed(raw.as_ref())))
         } else {
-            false
+            // Keyword search - match against all field values or entire event
+            let Some(raw) = event.raw() else {
+                return false;
+            };
+
+            self.match_patterns(&item.patterns, &item.modifiers, &Value::String(Cow::Borrowed(raw.as_ref())))
         }
     }
 
