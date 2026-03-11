@@ -49,11 +49,13 @@
 //! `SigmaRuleMatcher` is thread-safe and uses `Arc` internally for efficient sharing
 //! across threads.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
 use std::hash::Hash;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-
+use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -100,26 +102,62 @@ enum CompiledPattern {
     Null,
 }
 
+#[derive(Debug)]
+pub enum Value<'a> {
+    String(Cow<'a, str>),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    Time(DateTime<Utc>),
+    Ip(IpAddr)
+}
+
+impl Value<'_> {
+    pub fn as_str(&self) -> Cow<'_, str> {
+        match self {
+            Self::String(s) => Cow::Borrowed(s),
+            Self::Integer(v) => Cow::Owned(format!("{v}")),
+            Self::Float(v) => Cow::Owned(format!("{v}")),
+            Self::Boolean(v) => Cow::Owned(format!("{v}")),
+            Self::Time(v) => Cow::Owned(v.to_rfc3339()),
+            Self::Ip(v) => Cow::Owned(format!("{v}"))
+        }
+    }
+}
+
+impl<'a> std::fmt::Display for Value<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String(v) => write!(f, "{v}"),
+            Self::Integer(v) => write!(f, "{v}"),
+            Self::Float(v) => write!(f, "{v}"),
+            Self::Boolean(v) => write!(f, "{v}"),
+            Self::Time(v) => write!(f, "{v}"),
+            Self::Ip(v) => write!(f, "{v}"),
+        }
+    }
+}
+
 /// A generic event that allows matching on references
 pub trait Event {
     /// Check if the event contains a given field
     fn contains_key(&self, key: &str) -> bool;
 
     /// Retrieve the value in a given field
-    fn get(&self, key: &str) -> Option<&str>;
+    fn get<'a>(&'a self, key: &str) -> impl IntoIterator<Item = Value<'a>>;
 
     /// Iterate over all values in the event
-    fn values(&self) -> impl Iterator<Item = &str>;
+    fn values<'a>(&'a self) -> impl IntoIterator<Item = Value<'a>>;
 
     /// Get the raw value of an event
     ///
     /// Default implementation joins all field values
     fn raw<'a>(&'a self) -> Option<impl AsRef<str> + 'a> {
         let mut buf = String::new();
-        let mut iter = self.values().peekable();
+        let mut iter = self.values().into_iter().peekable();
 
         while let Some(val) = iter.next() {
-            buf.push_str(val.as_ref());
+            write!(&mut buf, "{val}").ok()?;
             if iter.peek().is_some() {
                 buf.push(' ');
             }
@@ -139,12 +177,12 @@ where
         HashMap::contains_key(self, key)
     }
 
-    fn get(&self, key: &str) -> Option<&str> {
-        HashMap::get(self, key).map(|v| v.as_ref())
+    fn get<'a>(&'a self, key: &str) -> impl IntoIterator<Item = Value<'a>> {
+        HashMap::get(self, key).map(|v| Value::String(Cow::Borrowed(v.as_ref())))
     }
-
-    fn values(&self) -> impl Iterator<Item = &str> {
-        HashMap::values(self).map(|v| v.as_ref())
+    
+    fn values<'a>(&'a self) -> impl IntoIterator<Item = Value<'a>> {
+        HashMap::values(self).map(|v| Value::String(Cow::Borrowed(v.as_ref())))
     }
 }
 
@@ -158,12 +196,12 @@ where
         BTreeMap::contains_key(self, key)
     }
 
-    fn get(&self, key: &str) -> Option<&str> {
-        BTreeMap::get(self, key).map(|v| v.as_ref())
+    fn get<'a>(&'a self, key: &str) -> impl IntoIterator<Item = Value<'a>> {
+        BTreeMap::get(self, key).map(|v| Value::String(Cow::Borrowed(v.as_ref())))
     }
-
-    fn values(&self) -> impl Iterator<Item = &str> {
-        BTreeMap::values(self).map(|v| v.as_ref())
+    
+    fn values<'a>(&'a self) -> impl IntoIterator<Item = Value<'a>> {
+        BTreeMap::values(self).map(|v| Value::String(Cow::Borrowed(v.as_ref())))
     }
 }
 
@@ -583,19 +621,14 @@ impl SigmaRuleMatcher {
 
         if let Some(field) = &item.field {
             // Field matching
-            if let Some(val) = event.get(field) {
-                self.match_patterns(&item.patterns, &item.modifiers, val)
-            } else {
-                // Field doesn't exist in event
-                false
-            }
+            event.get(field).into_iter().any(|v| self.match_patterns(&item.patterns, &item.modifiers, &v))
         } else {
             // Keyword search - match against all field values or entire event
             let Some(raw) = event.raw() else {
                 return false;
             };
 
-            self.match_patterns(&item.patterns, &item.modifiers, raw.as_ref())
+            self.match_patterns(&item.patterns, &item.modifiers, &Value::String(Cow::Borrowed(raw.as_ref())))
         }
     }
 
@@ -603,7 +636,7 @@ impl SigmaRuleMatcher {
         &self,
         patterns: &[CompiledPattern],
         modifiers: &[Modifier],
-        value: &str,
+        value: &Value<'_>,
     ) -> bool {
         if modifiers.contains(&Modifier::All) {
             // ALL: all patterns must match
@@ -625,45 +658,63 @@ impl SigmaRuleMatcher {
     }
 
     /// Match a compiled pattern against a value.
-    fn match_pattern(&self, pattern: &CompiledPattern, value: &str, modifiers: &[Modifier]) -> bool {
+    fn match_pattern(&self, pattern: &CompiledPattern, value: &Value<'_>, modifiers: &[Modifier]) -> bool {
         let case_sensitive = modifiers.contains(&Modifier::Cased);
         let negate = modifiers.contains(&Modifier::Neq);
 
         let matches = match pattern {
             CompiledPattern::Exact(s) => {
                 if case_sensitive {
-                    value == s
+                    &value.as_str() == s
                 } else {
-                    value.eq_ignore_ascii_case(s)
+                    value.as_str().eq_ignore_ascii_case(s)
                 }
             }
             CompiledPattern::Wildcard(pattern_str) => {
-                self.match_wildcard(pattern_str, value, case_sensitive)
+                self.match_wildcard(pattern_str, &value.as_str(), case_sensitive)
             }
             CompiledPattern::Regex(regex_str) => {
                 // For production use, we should cache compiled regex patterns
                 // For now, we'll do a simple implementation
-                self.match_regex(regex_str, value, modifiers)
+                self.match_regex(regex_str, &value.as_str(), modifiers)
             }
             CompiledPattern::Int(i) => {
-                if let Ok(parsed) = value.parse::<i64>() {
-                    self.match_numeric_int(parsed, *i, modifiers)
-                } else {
-                    false
+                match value {
+                    Value::Integer(v) => self.match_numeric_int(*v, *i, modifiers),
+                    Value::String(s) => {
+                        match s.parse::<i64>() {
+                            Ok(parsed) =>  self.match_numeric_int(parsed, *i, modifiers),
+                            _ => false
+                        }
+                    },
+                    _ => false
                 }
             }
             CompiledPattern::Float(f) => {
-                if let Ok(parsed) = value.parse::<f64>() {
-                    self.match_numeric_float(parsed, *f, modifiers)
-                } else {
-                    false
+                match value {
+                    Value::Float(v) => self.match_numeric_float(*v, *f, modifiers),
+                    Value::String(s) => {
+                        match s.parse::<f64>() {
+                            Ok(parsed) =>  self.match_numeric_float(parsed, *f, modifiers),
+                            _ => false
+                        }
+                    },
+                    _ => false
                 }
             }
             CompiledPattern::Bool(b) => {
-                value.eq_ignore_ascii_case(&b.to_string())
+                match value {
+                    Value::Boolean(v) => v == b,
+                    Value::String(s) if (4..=5).contains(&s.len()) => s.eq_ignore_ascii_case(&b.to_string()),
+                    _ => false
+                }
             }
             CompiledPattern::Null => {
-                value.is_empty() || value.eq_ignore_ascii_case("null")
+                if let Value::String(s) = value {
+                    s.is_empty() || s.eq_ignore_ascii_case("null")
+                } else {
+                    false
+                }
             }
         };
 
