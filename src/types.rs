@@ -76,8 +76,6 @@ pub struct LogSource {
     pub category: Option<String>,
     pub product: Option<String>,
     pub service: Option<String>,
-    /// Additional custom key-value pairs beyond the standard fields.
-    pub custom: HashMap<String, String>,
 }
 
 // ─── Value Modifiers ─────────────────────────────────────────────────────────
@@ -690,4 +688,145 @@ pub enum SigmaDocument {
 #[derive(Debug, Clone)]
 pub struct SigmaCollection {
     pub documents: Vec<SigmaDocument>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_display() {
+        assert_eq!(Status::Stable.to_string(), "stable");
+        assert_eq!(Status::Test.to_string(), "test");
+        assert_eq!(Status::Experimental.to_string(), "experimental");
+        assert_eq!(Status::Deprecated.to_string(), "deprecated");
+        assert_eq!(Status::Unsupported.to_string(), "unsupported");
+    }
+
+    #[test]
+    fn level_display() {
+        assert_eq!(Level::Informational.to_string(), "informational");
+        assert_eq!(Level::Low.to_string(), "low");
+        assert_eq!(Level::Medium.to_string(), "medium");
+        assert_eq!(Level::High.to_string(), "high");
+        assert_eq!(Level::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn sigma_string_has_special_parts() {
+        let plain = SigmaString::from_literal("hello");
+        assert!(!plain.has_special_parts());
+
+        let with_wildcard = SigmaString {
+            parts: vec![
+                SigmaStringPart::Literal("a".into()),
+                SigmaStringPart::WildcardMulti,
+            ],
+        };
+        assert!(with_wildcard.has_special_parts());
+    }
+
+    #[test]
+    fn sigma_string_as_plain_none() {
+        // Multiple parts → None
+        let multi = SigmaString {
+            parts: vec![
+                SigmaStringPart::Literal("a".into()),
+                SigmaStringPart::WildcardMulti,
+            ],
+        };
+        assert!(multi.as_plain().is_none());
+
+        // Single non-literal part → None
+        let wc = SigmaString {
+            parts: vec![SigmaStringPart::WildcardSingle],
+        };
+        assert!(wc.as_plain().is_none());
+    }
+
+    #[test]
+    fn sigma_string_display_special() {
+        let s = SigmaString {
+            parts: vec![
+                SigmaStringPart::Literal("a".into()),
+                SigmaStringPart::WildcardSingle,
+                SigmaStringPart::Placeholder("FOO".into()),
+            ],
+        };
+        assert_eq!(s.to_string(), "a?%FOO%");
+    }
+
+    #[test]
+    fn sigma_string_from_string() {
+        let s: SigmaString = String::from("hello").into();
+        assert_eq!(s.as_plain(), Some("hello"));
+    }
+
+    #[test]
+    fn sigma_value_deserialize_all_types() {
+        let float_val: SigmaValue = serde_yaml::from_str("3.14").unwrap();
+        assert!(matches!(float_val, SigmaValue::Float(f) if (f - 3.14).abs() < 0.001));
+
+        let bool_val: SigmaValue = serde_yaml::from_str("true").unwrap();
+        assert_eq!(bool_val, SigmaValue::Bool(true));
+
+        let int_val: SigmaValue = serde_yaml::from_str("42").unwrap();
+        assert_eq!(int_val, SigmaValue::Int(42));
+
+        let null_val: SigmaValue = serde_yaml::from_str("null").unwrap();
+        assert_eq!(null_val, SigmaValue::Null);
+    }
+
+    #[test]
+    fn sigma_value_display() {
+        assert_eq!(SigmaValue::String("hi".into()).to_string(), "hi");
+        assert_eq!(SigmaValue::Int(42).to_string(), "42");
+        assert_eq!(SigmaValue::Float(1.5).to_string(), "1.5");
+        assert_eq!(SigmaValue::Bool(false).to_string(), "false");
+        assert_eq!(SigmaValue::Null.to_string(), "null");
+    }
+
+    #[test]
+    fn condition_expression_display() {
+        assert_eq!(
+            ConditionExpression::Or(
+                Box::new(ConditionExpression::Identifier("a".into())),
+                Box::new(ConditionExpression::Identifier("b".into())),
+            )
+            .to_string(),
+            "(a or b)"
+        );
+        assert_eq!(
+            ConditionExpression::Not(Box::new(ConditionExpression::Identifier("x".into())))
+                .to_string(),
+            "not x"
+        );
+        assert_eq!(ConditionExpression::OneOfThem.to_string(), "1 of them");
+        assert_eq!(ConditionExpression::AllOfThem.to_string(), "all of them");
+        assert_eq!(
+            ConditionExpression::OneOfPattern("sel*".into()).to_string(),
+            "1 of sel*"
+        );
+        assert_eq!(
+            ConditionExpression::AllOfPattern("sel*".into()).to_string(),
+            "all of sel*"
+        );
+    }
+
+    #[test]
+    fn level_display_all() {
+        assert_eq!(Level::Informational.to_string(), "informational");
+        assert_eq!(Level::Low.to_string(), "low");
+        assert_eq!(Level::Medium.to_string(), "medium");
+        assert_eq!(Level::High.to_string(), "high");
+        assert_eq!(Level::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn sigma_value_deserialize_invalid_sequence() {
+        // A YAML sequence cannot be deserialized as a SigmaValue
+        let yaml = "- a\n- b";
+        let result: std::result::Result<SigmaValue, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
 }

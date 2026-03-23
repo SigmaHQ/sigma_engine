@@ -323,4 +323,73 @@ mod tests {
     fn unmatched_paren_errors() {
         assert!(parse_condition("(sel1 and sel2").is_err());
     }
+
+    #[test]
+    fn trailing_tokens_error() {
+        let err = parse_condition("selection extra").unwrap_err();
+        assert!(err.to_string().contains("Unexpected token"));
+    }
+
+    #[test]
+    fn one_not_followed_by_of_is_identifier() {
+        let expr = parse_condition("1 and sel").unwrap();
+        assert_eq!(
+            expr,
+            And(
+                Box::new(Identifier("1".into())),
+                Box::new(Identifier("sel".into())),
+            )
+        );
+    }
+
+    #[test]
+    fn all_not_followed_by_of_is_identifier() {
+        let expr = parse_condition("all and sel").unwrap();
+        assert_eq!(
+            expr,
+            And(
+                Box::new(Identifier("all".into())),
+                Box::new(Identifier("sel".into())),
+            )
+        );
+    }
+
+    #[test]
+    fn them_in_primary_is_identifier() {
+        let expr = parse_condition("them").unwrap();
+        assert_eq!(expr, Identifier("them".into()));
+    }
+
+    #[test]
+    fn of_in_primary_is_identifier() {
+        let expr = parse_condition("of").unwrap();
+        assert_eq!(expr, Identifier("of".into()));
+    }
+
+    #[test]
+    fn unexpected_token_error() {
+        // RParen without matching LParen triggers unexpected token
+        let err = parse_condition(")").unwrap_err();
+        assert!(err.to_string().contains("Unexpected token"));
+    }
+
+    #[test]
+    fn unexpected_end_of_expression() {
+        // `not` with nothing following
+        let err = parse_condition("not").unwrap_err();
+        assert!(err.to_string().contains("end of condition"));
+    }
+
+    #[test]
+    fn all_of_them() {
+        let expr = parse_condition("all of them").unwrap();
+        assert_eq!(expr, AllOfThem);
+    }
+
+    #[test]
+    fn error_after_of() {
+        // `1 of` followed by an invalid token (e.g. `and`)
+        let err = parse_condition("1 of and").unwrap_err();
+        assert!(err.to_string().contains("Expected 'them' or pattern after 'of'"));
+    }
 }

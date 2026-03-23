@@ -478,7 +478,20 @@ fn parse_detection_map(map: &Mapping) -> Result<Vec<DetectionItem>, Error> {
             .as_str()
             .ok_or_else(|| Error::InvalidDetection(format!("Map key must be a string: {key:?}")))?;
         let (field, modifiers) = parse_field_and_modifiers(key_str)?;
-        let values = yaml_to_sigma_values(value)?;
+        let mut values = yaml_to_sigma_values(value)?;
+        
+        // Apply expand modifier if present to convert %name% patterns into placeholders
+        if modifiers.contains(&Modifier::Expand) {
+            values = values.into_iter().map(|v| {
+                match v {
+                    SigmaValue::String(sigma_string) => {
+                        SigmaValue::String(expand_placeholders(&sigma_string))
+                    }
+                    other => other,
+                }
+            }).collect();
+        }
+        
         items.push(DetectionItem {
             field,
             modifiers,
@@ -621,21 +634,11 @@ fn parse_logsource(value: &Value) -> Result<LogSource, Error> {
         message: "Must be a mapping".into(),
     })?;
 
-    let known = ["category", "product", "service"];
-    let mut custom = HashMap::new();
-    for (k, v) in map {
-        if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
-            if !known.contains(&ks) {
-                custom.insert(ks.to_string(), vs.to_string());
-            }
-        }
-    }
-
+    // Simply ignore any extra attributes beyond category, product, and service
     Ok(LogSource {
         category: get_string(map, "category"),
         product: get_string(map, "product"),
         service: get_string(map, "service"),
-        custom,
     })
 }
 
@@ -1222,4 +1225,220 @@ mod tests {
         assert_eq!(expanded.parts.len(), 2);
         assert_eq!(expanded.parts[0], SigmaStringPart::WildcardMulti);
         assert_eq!(expanded.parts[1], SigmaStringPart::Literal(".exe".to_string()));
-    }}
+    }
+
+    #[test]
+    fn test_parse_sigma_string_single_wildcard() {
+        let result = parse_sigma_string("a?b");
+        assert_eq!(result.parts.len(), 3);
+        assert_eq!(result.parts[0], SigmaStringPart::Literal("a".to_string()));
+        assert_eq!(result.parts[1], SigmaStringPart::WildcardSingle);
+        assert_eq!(result.parts[2], SigmaStringPart::Literal("b".to_string()));
+    }
+
+    #[test]
+    fn test_value_as_string_number() {
+        let val = Value::Number(serde_yaml::Number::from(42));
+        assert_eq!(value_as_string(&val), Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_value_as_string_bool() {
+        let val = Value::Bool(true);
+        assert_eq!(value_as_string(&val), Some("true".to_string()));
+    }
+
+    #[test]
+    fn test_value_as_string_tagged() {
+        let tagged = serde_yaml::value::TaggedValue {
+            tag: serde_yaml::value::Tag::new("!test"),
+            value: Value::String("hello".to_string()),
+        };
+        let val = Value::Tagged(Box::new(tagged));
+        assert_eq!(value_as_string(&val), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_value_as_string_null() {
+        let val = Value::Null;
+        assert_eq!(value_as_string(&val), None);
+    }
+
+    #[test]
+    fn test_get_i64() {
+        let mut map = Mapping::new();
+        map.insert(Value::String("count".to_string()), Value::Number(serde_yaml::Number::from(10)));
+        assert_eq!(get_i64(&map, "count"), Some(10));
+        assert_eq!(get_i64(&map, "missing"), None);
+
+        // Non-number value
+        map.insert(Value::String("text".to_string()), Value::String("hello".to_string()));
+        assert_eq!(get_i64(&map, "text"), None);
+    }
+
+    #[test]
+    fn test_yaml_to_sigma_value_float() {
+        let val = Value::Number(serde_yaml::Number::from(3.14_f64));
+        let result = yaml_to_sigma_value(&val).unwrap();
+        match result {
+            SigmaValue::Float(f) => assert!((f - 3.14).abs() < 0.01),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_yaml_to_sigma_value_tagged() {
+        let tagged = serde_yaml::value::TaggedValue {
+            tag: serde_yaml::value::Tag::new("!test"),
+            value: Value::String("hello".to_string()),
+        };
+        let val = Value::Tagged(Box::new(tagged));
+        let result = yaml_to_sigma_value(&val).unwrap();
+        match result {
+            SigmaValue::String(_) => {}
+            other => panic!("Expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_yaml_to_sigma_value_invalid() {
+        let val = Value::Sequence(vec![Value::String("a".to_string())]);
+        let result = yaml_to_sigma_value(&val);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_correlation_extended_condition_invalid_type() {
+        let yaml = r#"
+title: Test Correlation
+name: test_correlation
+type: sigma_correlation_rule
+correlation:
+    type: event_count
+    rules:
+        - rule1
+    group-by:
+        - src_ip
+    timespan: 5m
+    condition: "rule1 or rule2"
+"#;
+        let result = crate::SigmaCollection::from_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_correlation_condition_mismatch() {
+        let yaml = r#"
+title: Test Correlation
+name: test_correlation
+type: sigma_correlation_rule
+correlation:
+    type: temporal
+    rules:
+        - rule1
+        - rule2
+    group-by:
+        - src_ip
+    timespan: 5m
+    condition: "rule1 or rule3"
+"#;
+        let result = crate::SigmaCollection::from_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_correlation_condition_pattern_scope_with_rules() {
+        let yaml = r#"
+title: Test Correlation
+name: test_correlation
+type: sigma_correlation_rule
+correlation:
+    type: temporal
+    rules:
+        - rule1
+    group-by:
+        - src_ip
+    timespan: 5m
+    condition: "1 of them"
+"#;
+        let result = crate::SigmaCollection::from_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_detection_rule_with_custom_fields() {
+        let yaml = r#"
+title: Test Rule
+id: 12345678-1234-1234-1234-123456789012
+status: stable
+level: critical
+description: A test rule
+author: tester
+date: 2024-01-15
+modified: 2024-06-01
+references:
+    - https://example.com
+tags:
+    - attack.execution
+falsepositives:
+    - Legitimate admin activity
+fields:
+    - CommandLine
+logsource:
+    product: windows
+    category: process_creation
+    service: sysmon
+detection:
+    selection:
+        EventID: 1
+    condition: selection
+custom_field: custom_value
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        let doc = &collection.documents[0];
+        match doc {
+            crate::SigmaDocument::Rule(rule) => {
+                assert_eq!(rule.title, "Test Rule");
+                assert_eq!(rule.status, Some(crate::types::Status::Stable));
+                assert_eq!(rule.level, Some(crate::types::Level::Critical));
+                assert!(rule.custom.contains_key("custom_field"));
+            }
+            _ => panic!("Expected Rule"),
+        }
+    }
+
+    #[test]
+    fn test_parse_correlation_rule_fields() {
+        let yaml = r#"
+title: Test Correlation
+name: test_corr
+id: 12345678-1234-1234-1234-123456789012
+type: sigma_correlation_rule
+status: test
+level: high
+description: A test correlation rule
+author: tester
+date: 2024-01-15
+modified: 2024-06-01
+correlation:
+    type: event_count
+    rules:
+        - rule1
+    group-by:
+        - src_ip
+    timespan: 5m
+    condition:
+        gte: 10
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        let doc = &collection.documents[0];
+        match doc {
+            crate::SigmaDocument::Correlation(corr) => {
+                assert_eq!(corr.title, "Test Correlation");
+                assert_eq!(corr.status, Some(crate::types::Status::Test));
+                assert_eq!(corr.level, Some(crate::types::Level::High));
+            }
+            _ => panic!("Expected Correlation"),
+        }
+    }
+}
