@@ -24,7 +24,7 @@
 //!     conditions:
 //!       index: "windows"
 //!     rule_conditions:
-//!       - type: logsource_product
+//!       - type: logsource
 //!         product: windows
 //! "#;
 //!
@@ -873,30 +873,42 @@ pub struct TransformationConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RuleCondition {
-    /// Match rules by log source category.
-    #[serde(rename = "logsource_category")]
-    LogSourceCategory { category: String },
-    
-    /// Match rules by log source product.
-    #[serde(rename = "logsource_product")]
-    LogSourceProduct { product: String },
-    
-    /// Match rules by log source service.
-    #[serde(rename = "logsource_service")]
-    LogSourceService { service: String },
+    /// Match rules by log source attributes.
+    ///
+    /// Any combination of `category`, `product`, and `service` can be specified.
+    /// Only the fields that are set are compared; unspecified fields are ignored.
+    /// This mirrors pySigma's `LogsourceCondition`.
+    #[serde(rename = "logsource")]
+    LogSource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        product: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+    },
 }
 
 impl RuleCondition {
     fn matches(&self, rule: &SigmaRule) -> bool {
         match self {
-            Self::LogSourceCategory { category } => {
-                rule.logsource.category.as_deref() == Some(category)
-            }
-            Self::LogSourceProduct { product } => {
-                rule.logsource.product.as_deref() == Some(product)
-            }
-            Self::LogSourceService { service } => {
-                rule.logsource.service.as_deref() == Some(service)
+            Self::LogSource { category, product, service } => {
+                if let Some(cat) = category
+                    && rule.logsource.category.as_deref() != Some(cat)
+                {
+                    return false;
+                }
+                if let Some(prod) = product
+                    && rule.logsource.product.as_deref() != Some(prod)
+                {
+                    return false;
+                }
+                if let Some(svc) = service
+                    && rule.logsource.service.as_deref() != Some(svc)
+                {
+                    return false;
+                }
+                true
             }
         }
     }
@@ -1134,7 +1146,7 @@ transformations:
     type: field_name_prefix
     prefix: "proc."
     rule_conditions:
-      - type: logsource_category
+      - type: logsource
         category: process_creation
 "#;
         
@@ -1406,7 +1418,7 @@ transformations:
     type: field_name_prefix
     prefix: "proc."
     rule_conditions:
-      - type: logsource_product
+      - type: logsource
         product: linux
 "#;
         
@@ -2423,7 +2435,7 @@ transformations:
     type: field_name_prefix
     prefix: "s."
     rule_conditions:
-      - type: logsource_service
+      - type: logsource
         service: sysmon
 "#;
         let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
