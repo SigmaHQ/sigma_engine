@@ -86,8 +86,9 @@ use crate::types::{
 /// A log event that can be matched against Sigma rules.
 #[derive(Debug, Clone)]
 pub struct LogEvent {
-    /// The log source this event belongs to
-    pub log_source: LogSource,
+    /// The log source this event belongs to.
+    /// When `None`, the event bypasses log source matching and is tested against all rules.
+    pub log_source: Option<LogSource>,
     /// The event data as field-value pairs
     pub data: HashMap<String, String>,
     /// The raw event string (if available)
@@ -101,9 +102,9 @@ impl LogEvent {
     ///
     /// The event timestamp is set to the current UTC time. Use
     /// [`LogEvent::with_timestamp`] to override it.
-    pub fn from_fields(log_source: LogSource, data: HashMap<String, String>) -> Self {
+    pub fn from_fields(log_source: impl Into<Option<LogSource>>, data: HashMap<String, String>) -> Self {
         Self {
-            log_source,
+            log_source: log_source.into(),
             data,
             raw: None,
             timestamp: Utc::now(),
@@ -114,11 +115,11 @@ impl LogEvent {
     ///
     /// # Errors
     /// Returns an error if the JSON cannot be parsed.
-    pub fn from_json(log_source: LogSource, json: &str) -> Result<Self, serde_json::Error> {
+    pub fn from_json(log_source: impl Into<Option<LogSource>>, json: &str) -> Result<Self, serde_json::Error> {
         let parsed: JsonValue = serde_json::from_str(json)?;
         let data = Self::json_to_fields(&parsed);
         Ok(Self {
-            log_source,
+            log_source: log_source.into(),
             data,
             raw: Some(json.to_string()),
             timestamp: Utc::now(),
@@ -126,11 +127,11 @@ impl LogEvent {
     }
 
     /// Create a new log event from a plain unstructured string.
-    pub fn from_plain(log_source: LogSource, text: String) -> Self {
+    pub fn from_plain(log_source: impl Into<Option<LogSource>>, text: String) -> Self {
         let mut data = HashMap::new();
         data.insert("_raw".to_string(), text.clone());
         Self {
-            log_source,
+            log_source: log_source.into(),
             data,
             raw: Some(text),
             timestamp: Utc::now(),
@@ -140,10 +141,10 @@ impl LogEvent {
     /// Create a new log event from Field="Value" format.
     ///
     /// This parses a string like: `EventID="4688" User="SYSTEM" CommandLine="cmd.exe"`
-    pub fn from_field_value_format(log_source: LogSource, text: &str) -> Self {
+    pub fn from_field_value_format(log_source: impl Into<Option<LogSource>>, text: &str) -> Self {
         let data = Self::parse_field_value_format(text);
         Self {
-            log_source,
+            log_source: log_source.into(),
             data,
             raw: Some(text.to_string()),
             timestamp: Utc::now(),
@@ -549,13 +550,14 @@ impl LogProcessor {
     ) {
         while let Ok(event) = event_rx.recv() {
             for matcher in &matchers {
-                if Self::log_source_matches(&event.log_source, &matcher.rule.logsource)
+                if Self::log_source_matches(event.log_source.as_ref(), &matcher.rule.logsource)
                     && matcher.matches(&event.data)
                 {
                     let detection = Detection {
                         rule: matcher.rule.clone(),
                         event: event.clone(),
                     };
+                    // If send fails, the receiver was dropped, so we should exit
                     if detection_tx.send(detection).is_err() {
                         return;
                     }
@@ -599,12 +601,15 @@ impl LogProcessor {
     /// Check if an event's log source matches a rule's log source.
     ///
     /// Matching follows the Sigma specification:
+    /// - If the event has no log source (`None`), all rules match (bypass check)
     /// - An empty field in the rule matches any value in the event
     /// - A field value in the rule must match the corresponding event field value
-    pub(crate) fn log_source_matches(
-        event_source: &LogSource,
-        rule_source: &LogSource,
-    ) -> bool {
+    fn log_source_matches(event_source: Option<&LogSource>, rule_source: &LogSource) -> bool {
+        let event_source = match event_source {
+            Some(s) => s,
+            None => return true,
+        };
+
         // Check category
         if let Some(rule_category) = &rule_source.category {
             match &event_source.category {
@@ -1221,7 +1226,7 @@ mod tests {
             service: None,
             
         };
-        assert!(LogProcessor::log_source_matches(&event_source1, &rule_source));
+        assert!(LogProcessor::log_source_matches(Some(&event_source1), &rule_source));
 
         // Extra fields in event should still match
         let event_source2 = LogSource {
@@ -1230,7 +1235,7 @@ mod tests {
             service: Some("security".to_string()),
             
         };
-        assert!(LogProcessor::log_source_matches(&event_source2, &rule_source));
+        assert!(LogProcessor::log_source_matches(Some(&event_source2), &rule_source));
 
         // Missing required field should not match
         let event_source3 = LogSource {
@@ -1239,7 +1244,7 @@ mod tests {
             service: None,
             
         };
-        assert!(!LogProcessor::log_source_matches(&event_source3, &rule_source));
+        assert!(!LogProcessor::log_source_matches(Some(&event_source3), &rule_source));
 
         // Different value should not match
         let event_source4 = LogSource {
@@ -1248,7 +1253,10 @@ mod tests {
             service: None,
             
         };
-        assert!(!LogProcessor::log_source_matches(&event_source4, &rule_source));
+        assert!(!LogProcessor::log_source_matches(Some(&event_source4), &rule_source));
+
+        // None log source should bypass all checks
+        assert!(LogProcessor::log_source_matches(None, &rule_source));
     }
 
     #[test]
@@ -1297,6 +1305,43 @@ detection:
         };
         assert_eq!(detection.rule.title, "Test Rule");
         assert_eq!(detection.event.data.get("EventID"), Some(&"4688".to_string()));
+    }
+
+    #[test]
+    fn test_processor_none_log_source_matches_all_rules() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        EventID: 4688
+    condition: selection
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            crate::SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+
+        let processor = LogProcessor::new(vec![rule]).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // Send event with no log source — should bypass log source matching
+        let mut data = HashMap::new();
+        data.insert("EventID".to_string(), "4688".to_string());
+
+        let event = LogEvent::from_fields(None::<LogSource>, data);
+        event_tx.send(event).unwrap();
+        drop(event_tx);
+
+        let result = detection_rx.recv().unwrap();
+        let detection = match result {
+            DetectionResult::Rule(d) => d,
+            _ => panic!("Expected rule detection"),
+        };
+        assert_eq!(detection.rule.title, "Test Rule");
     }
 
     #[test]
@@ -1399,21 +1444,21 @@ detection:
             product: None,
             service: Some("security".to_string()),
         };
-        assert!(LogProcessor::log_source_matches(&event_source1, &rule_source));
+        assert!(LogProcessor::log_source_matches(Some(&event_source1), &rule_source));
 
         let event_source2 = LogSource {
             category: None,
             product: None,
             service: Some("application".to_string()),
         };
-        assert!(!LogProcessor::log_source_matches(&event_source2, &rule_source));
+        assert!(!LogProcessor::log_source_matches(Some(&event_source2), &rule_source));
 
         let event_source3 = LogSource {
             category: None,
             product: None,
             service: None,
         };
-        assert!(!LogProcessor::log_source_matches(&event_source3, &rule_source));
+        assert!(!LogProcessor::log_source_matches(Some(&event_source3), &rule_source));
     }
 
     #[test]
@@ -1429,7 +1474,7 @@ detection:
             product: None,
             service: None,
         };
-        assert!(!LogProcessor::log_source_matches(&event_source, &rule_source));
+        assert!(!LogProcessor::log_source_matches(Some(&event_source), &rule_source));
     }
 
     #[test]
