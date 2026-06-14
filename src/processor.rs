@@ -2260,4 +2260,623 @@ correlation:
         // The old event must have been discarded, so the threshold of 3 is never reached.
         assert_eq!(corr_hits, 0);
     }
+
+    // ─── with_correlation_rules builder ──────────────────────────────────────
+
+    #[test]
+    fn test_with_correlation_rules_builder() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        let corr_yaml = r#"
+title: Count
+type: correlation
+correlation:
+    type: event_count
+    rules:
+        - ev
+    group-by: []
+    timespan: 5m
+    condition:
+        gte: 2
+"#;
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+
+        // Load only detection rules, then add correlation rules via builder
+        let det_rules: Vec<_> = collection
+            .documents
+            .iter()
+            .filter_map(|d| match d {
+                crate::SigmaDocument::Rule(r) => Some(r.clone()),
+                _ => None,
+            })
+            .collect();
+        let corr_rules: Vec<_> = collection
+            .documents
+            .iter()
+            .filter_map(|d| match d {
+                crate::SigmaDocument::Correlation(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let processor = LogProcessor::new(det_rules)
+            .unwrap()
+            .with_correlation_rules(corr_rules);
+
+        assert_eq!(processor.correlation_rules.len(), 1);
+
+        let (event_tx, detection_rx) = processor.start();
+        for _ in 0..2 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    // ─── log_source_matches product/service mismatch ──────────────────────────
+
+    #[test]
+    fn test_log_source_product_mismatch() {
+        let rule_source = LogSource {
+            category: None,
+            product: Some("windows".to_string()),
+            service: None,
+        };
+        let event_source = LogSource {
+            category: None,
+            product: Some("linux".to_string()),
+            service: None,
+        };
+        assert!(!LogProcessor::log_source_matches(Some(&event_source), &rule_source));
+    }
+
+    #[test]
+    fn test_log_source_service_value_mismatch() {
+        let rule_source = LogSource {
+            category: None,
+            product: None,
+            service: Some("security".to_string()),
+        };
+        let event_source = LogSource {
+            category: None,
+            product: None,
+            service: Some("application".to_string()),
+        };
+        assert!(!LogProcessor::log_source_matches(Some(&event_source), &rule_source));
+    }
+
+    // ─── rule_ref_for by id ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_correlation_by_rule_id() {
+        let det_yaml = r#"
+title: Event By ID
+id: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 1
+    condition: sel
+"#;
+        let corr_yaml = r#"
+title: Count By ID
+type: correlation
+correlation:
+    type: event_count
+    rules:
+        - aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    group-by: []
+    timespan: 5m
+    condition:
+        gte: 2
+"#;
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..2 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    // ─── event window eviction ────────────────────────────────────────────────
+
+    #[test]
+    fn test_event_window_eviction() {
+        use chrono::TimeZone;
+
+        let det_yaml = make_detection_rule_yaml("evict_rule", "Evict Rule");
+        let corr_yaml = r#"
+title: Short Window
+type: correlation
+correlation:
+    type: event_count
+    rules:
+        - evict_rule
+    group-by: []
+    timespan: 10s
+    condition:
+        gte: 3
+"#;
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // Two old events (t=0) and one recent event (t=100s).
+        // When the recent event arrives, the old events are outside the 10s window
+        // and get evicted, so the count stays at 1 — below the threshold of 3.
+        let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 1, 40).unwrap(); // 100 seconds later
+
+        let mut e1 = make_test_event("1");
+        e1.timestamp = t0;
+        let mut e2 = make_test_event("1");
+        e2.timestamp = t0;
+        let mut e3 = make_test_event("1");
+        e3.timestamp = t1;
+
+        event_tx.send(e1).unwrap();
+        event_tx.send(e2).unwrap();
+        event_tx.send(e3).unwrap();
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        // After eviction, window only has 1 event, below the threshold of 3
+        assert_eq!(corr_hits, 0);
+    }
+
+    // ─── eval_simple_condition variations ─────────────────────────────────────
+
+    #[test]
+    fn test_event_count_gt_condition() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "gt: 2");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // 3 events: count=3 > 2, should fire
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    #[test]
+    fn test_event_count_gt_not_satisfied() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "gt: 3" means count must be > 3; sending 3 events (count=3) should NOT fire
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "gt: 3");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    #[test]
+    fn test_event_count_lt_condition() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "lt: 5" means count < 5; sending 2 events should fire on each
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "lt: 5");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..2 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    #[test]
+    fn test_event_count_lt_not_satisfied() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "lt: 1" means count < 1; count is always >= 1, so this never fires
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "lt: 1");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    #[test]
+    fn test_event_count_lte_not_satisfied() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "lte: 0" means count <= 0; count is always >= 1, so this never fires
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "lte: 0");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    #[test]
+    fn test_event_count_eq_condition() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "eq: 3" means count == 3; sending exactly 3 events should fire once
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "eq: 3");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    #[test]
+    fn test_event_count_eq_not_satisfied() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "eq: 5" means count == 5; sending 3 events should NOT fire
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "eq: 5");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    #[test]
+    fn test_event_count_neq_condition() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "neq: 2" means count != 2; sending 3 events (count=3) should fire
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "neq: 2");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        for _ in 0..3 {
+            event_tx.send(make_test_event("1")).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    #[test]
+    fn test_event_count_neq_not_satisfied() {
+        let det_yaml = make_detection_rule_yaml("ev", "Event");
+        // "neq: 1" means count != 1; sending exactly 1 event (count=1) should NOT fire
+        let corr_yaml = make_corr_yaml("event_count", &["ev"], &[], "5m", "neq: 1");
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        event_tx.send(make_test_event("1")).unwrap();
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    // ─── value_percentile correlation tests ───────────────────────────────────
+
+    #[test]
+    fn test_value_percentile_correlation_fires() {
+        let det_yaml = r#"
+title: Latency Event
+name: latency_event
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 1
+    condition: sel
+"#;
+        let corr_yaml = r#"
+title: High P95 Latency
+type: correlation
+correlation:
+    type: value_percentile
+    rules:
+        - latency_event
+    group-by: []
+    timespan: 5m
+    condition:
+        field: Latency
+        gte: 900
+"#;
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // Send 10 latency events; P95 of these should be >= 900
+        for ms in &[100, 200, 300, 400, 500, 600, 700, 800, 900, 1000] {
+            let mut data = HashMap::new();
+            data.insert("EventID".to_string(), "1".to_string());
+            data.insert("Latency".to_string(), ms.to_string());
+            let event = LogEvent::from_fields(
+                LogSource { category: None, product: Some("test".to_string()), service: None },
+                data,
+            );
+            event_tx.send(event).unwrap();
+        }
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    #[test]
+    fn test_value_percentile_empty_field_no_fire() {
+        let det_yaml = r#"
+title: Event
+name: perc_event
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 1
+    condition: sel
+"#;
+        let corr_yaml = r#"
+title: Percentile
+type: correlation
+correlation:
+    type: value_percentile
+    rules:
+        - perc_event
+    group-by: []
+    timespan: 5m
+    condition:
+        field: MissingField
+        gte: 100
+"#;
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // Event has no "MissingField" → values list is empty → false
+        event_tx.send(make_test_event("1")).unwrap();
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    // ─── value_avg empty field ────────────────────────────────────────────────
+
+    #[test]
+    fn test_value_avg_empty_field_no_fire() {
+        let det_yaml = r#"
+title: Avg Event
+name: avg_event
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 1
+    condition: sel
+"#;
+        let corr_yaml = r#"
+title: Avg Empty
+type: correlation
+correlation:
+    type: value_avg
+    rules:
+        - avg_event
+    group-by: []
+    timespan: 5m
+    condition:
+        field: MissingField
+        gte: 80
+"#;
+        let combined = format!("{}\n---\n{}", det_yaml, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // No "MissingField" → empty values → returns false
+        event_tx.send(make_test_event("1")).unwrap();
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
+
+    // ─── temporal with extended condition ─────────────────────────────────────
+
+    #[test]
+    fn test_temporal_with_extended_condition() {
+        let yaml_a = r#"
+title: Rule A
+name: rule_a
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 1
+    condition: sel
+"#;
+        let yaml_b = r#"
+title: Rule B
+name: rule_b
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 2
+    condition: sel
+"#;
+        // Extended condition on temporal: both must fire
+        let corr_yaml = r#"
+title: Temporal With Extended
+type: correlation
+correlation:
+    type: temporal
+    rules:
+        - rule_a
+        - rule_b
+    group-by: []
+    timespan: 5m
+    condition: "rule_a and rule_b"
+"#;
+        let combined = format!("{}\n---\n{}\n---\n{}", yaml_a, yaml_b, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        event_tx.send(make_test_event("1")).unwrap();
+        event_tx.send(make_test_event("2")).unwrap();
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert!(corr_hits >= 1);
+    }
+
+    #[test]
+    fn test_temporal_with_extended_condition_not_satisfied() {
+        let yaml_a = r#"
+title: Rule A
+name: rule_a
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 1
+    condition: sel
+"#;
+        let yaml_b = r#"
+title: Rule B
+name: rule_b
+logsource:
+    product: test
+detection:
+    sel:
+        EventID: 2
+    condition: sel
+"#;
+        // Extended condition requires both, but only rule_a fires
+        let corr_yaml = r#"
+title: Temporal Extended Not Met
+type: correlation
+correlation:
+    type: temporal
+    rules:
+        - rule_a
+        - rule_b
+    group-by: []
+    timespan: 5m
+    condition: "rule_a and rule_b"
+"#;
+        let combined = format!("{}\n---\n{}\n---\n{}", yaml_a, yaml_b, corr_yaml);
+        let collection = crate::SigmaCollection::from_yaml(&combined).unwrap();
+        let processor = LogProcessor::from_collection(&collection).unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        // Only rule_a fires — extended AND requires both
+        event_tx.send(make_test_event("1")).unwrap();
+        drop(event_tx);
+
+        let corr_hits: u32 = detection_rx
+            .iter()
+            .filter(|r| matches!(r, DetectionResult::Correlation(_)))
+            .count() as u32;
+        assert_eq!(corr_hits, 0);
+    }
 }
