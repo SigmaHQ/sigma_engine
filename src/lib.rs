@@ -85,7 +85,7 @@
 //! ### Processing events with multithreading
 //!
 //! ```rust
-//! use sigma_engine::{SigmaCollection, SigmaDocument, LogProcessor, LogEvent, LogSource};
+//! use sigma_engine::{SigmaCollection, SigmaDocument, LogProcessor, LogEvent, LogSource, DetectionResult};
 //! use std::collections::HashMap;
 //!
 //! let yaml = r#"
@@ -126,8 +126,11 @@
 //! drop(event_tx); // Signal completion
 //!
 //! // Receive detections
-//! if let Ok(detection) = detection_rx.recv() {
-//!     println!("Rule matched: {}", detection.rule.title);
+//! if let Ok(result) = detection_rx.recv() {
+//!     match result {
+//!         DetectionResult::Rule(detection) => println!("Rule matched: {}", detection.rule.title),
+//!         DetectionResult::Correlation(cd) => println!("Correlation triggered: {}", cd.rule.title),
+//!     }
 //! }
 //! ```
 
@@ -143,7 +146,10 @@ pub use error::Error;
 pub use pipeline::*;
 pub use types::*;
 pub use matcher::SigmaRuleMatcher;
-pub use processor::{LogProcessor, Detection, LogEvent};
+pub use processor::{
+    parse_timespan, CorrelationDetection, Detection, DetectionResult, LogEvent, LogProcessor,
+    ProcessorConfig,
+};
 
 // Re-export chrono's NaiveDate for date field access
 pub use chrono::NaiveDate;

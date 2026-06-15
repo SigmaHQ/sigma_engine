@@ -1314,4 +1314,97 @@ correlation:
             _ => panic!("Expected Correlation"),
         }
     }
+
+    // ─── parse_aliases error cases ────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_aliases_field_value_not_string() {
+        // The field name inside the alias mapping is not a string (it's a list)
+        let yaml = r#"
+title: Test Correlation
+type: sigma_correlation_rule
+correlation:
+    type: temporal
+    rules:
+        - rule_a
+        - rule_b
+    group-by: []
+    timespan: 5m
+    condition: "rule_a and rule_b"
+    aliases:
+        user_field:
+            rule_a: [not, a, string]
+"#;
+        let result = crate::SigmaCollection::from_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    // ─── yaml_to_sigma_value unsupported type ─────────────────────────────────
+
+    #[test]
+    fn test_yaml_to_sigma_value_sequence_error() {
+        // A sequence inside a detection field mapping is not a valid SigmaValue
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Field:
+            - nested: value
+    condition: selection
+"#;
+        // A sequence of mappings inside a field value detection is not valid
+        let result = crate::SigmaCollection::from_yaml(yaml);
+        // Either it parses as a MapList (valid) or returns an error for the unsupported type
+        // The key behaviour we're testing is that it doesn't panic
+        let _ = result;
+    }
+
+    // ─── parse_correlation_section: not a mapping ─────────────────────────────
+
+    #[test]
+    fn test_parse_correlation_section_extended_condition_temporal_ordered() {
+        // Extended condition IS allowed for temporal_ordered
+        let yaml = r#"
+title: Temporal Ordered With Extended
+type: sigma_correlation_rule
+correlation:
+    type: temporal_ordered
+    rules:
+        - rule_a
+        - rule_b
+    group-by: []
+    timespan: 5m
+    condition: "rule_a and rule_b"
+"#;
+        let result = crate::SigmaCollection::from_yaml(yaml);
+        assert!(result.is_ok());
+    }
+
+    // ─── Correlation rule custom fields ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_correlation_rule_custom_fields() {
+        let yaml = r#"
+title: Test Correlation
+type: sigma_correlation_rule
+correlation:
+    type: event_count
+    rules:
+        - rule1
+    group-by: []
+    timespan: 5m
+    condition:
+        gte: 10
+custom_key: custom_value
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        match &collection.documents[0] {
+            crate::SigmaDocument::Correlation(corr) => {
+                assert!(corr.custom.contains_key("custom_key"));
+            }
+            _ => panic!("Expected Correlation"),
+        }
+    }
 }

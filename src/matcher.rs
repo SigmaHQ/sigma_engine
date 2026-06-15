@@ -2619,5 +2619,256 @@ detection:
         event.insert("Count".to_string(), "42".to_string());
         assert!(matcher.matches(&event));
     }
+
+    // ─── BTreeMap event matching ─────────────────────────────────────────────
+
+    #[test]
+    fn test_matcher_with_btreemap_event() {
+        let yaml = r#"
+title: Test Rule
+logsource:
+    product: windows
+detection:
+    selection:
+        EventID: 4688
+        Image|contains: 'cmd'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event = std::collections::BTreeMap::new();
+        event.insert("EventID".to_string(), "4688".to_string());
+        event.insert("Image".to_string(), "C:\\Windows\\System32\\cmd.exe".to_string());
+
+        assert!(matcher.matches(&event));
+
+        let mut no_match = std::collections::BTreeMap::new();
+        no_match.insert("EventID".to_string(), "9999".to_string());
+        assert!(!matcher.matches(&no_match));
+    }
+
+    #[test]
+    fn test_btreemap_keyword_search() {
+        let yaml = r#"
+title: Keyword Rule
+logsource:
+    product: test
+detection:
+    keywords:
+        - '*cmd.exe*'
+    condition: keywords
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        let mut event: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        event.insert("CommandLine".to_string(), "C:\\Windows\\cmd.exe".to_string());
+
+        assert!(matcher.matches(&event));
+    }
+
+    // ─── Value::as_str and Display for non-String variants ──────────────────
+
+    #[test]
+    fn test_value_as_str_variants() {
+        use chrono::TimeZone;
+        use std::net::IpAddr;
+        use std::str::FromStr;
+
+        let int_val = Value::Integer(42i64);
+        assert_eq!(int_val.as_str(), "42");
+
+        let float_val = Value::Float(3.14f64);
+        assert!(float_val.as_str().starts_with("3.14"));
+
+        let bool_val = Value::Boolean(true);
+        assert_eq!(bool_val.as_str(), "true");
+
+        let time_val = Value::Time(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        assert!(time_val.as_str().contains("2024"));
+
+        let ip_val = Value::Ip(IpAddr::from_str("192.168.1.1").unwrap());
+        assert_eq!(ip_val.as_str(), "192.168.1.1");
+    }
+
+    #[test]
+    fn test_value_display_variants() {
+        use chrono::TimeZone;
+        use std::net::IpAddr;
+        use std::str::FromStr;
+
+        assert_eq!(format!("{}", Value::Integer(99i64)), "99");
+        assert!(format!("{}", Value::Float(1.5f64)).starts_with("1.5"));
+        assert_eq!(format!("{}", Value::Boolean(false)), "false");
+        assert!(format!("{}", Value::Time(Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap())).contains("2024"));
+        assert_eq!(format!("{}", Value::Ip(IpAddr::from_str("10.0.0.1").unwrap())), "10.0.0.1");
+    }
+
+    // ─── Bool pattern matching ───────────────────────────────────────────────
+
+    #[test]
+    fn test_matcher_bool_string_match() {
+        // When the event field contains "true" string, it should match a bool pattern
+        let yaml = r#"
+title: Bool Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Flag: true
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // String "true" should match boolean true pattern
+        let mut event = HashMap::new();
+        event.insert("Flag".to_string(), "true".to_string());
+        assert!(matcher.matches(&event));
+
+        // String "false" should not match boolean true pattern
+        let mut event2 = HashMap::new();
+        event2.insert("Flag".to_string(), "false".to_string());
+        assert!(!matcher.matches(&event2));
+
+        // Numeric value should not match a bool pattern
+        let mut event3 = HashMap::new();
+        event3.insert("Flag".to_string(), "1".to_string());
+        assert!(!matcher.matches(&event3));
+    }
+
+    // ─── Null pattern ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_matcher_null_pattern_non_string_no_match() {
+        // A null pattern with a non-string value type should not match
+        let yaml = r#"
+title: Null Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Field: null
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Empty string matches null pattern
+        let mut event_empty = HashMap::new();
+        event_empty.insert("Field".to_string(), "".to_string());
+        assert!(matcher.matches(&event_empty));
+
+        // "null" string matches null pattern
+        let mut event_null = HashMap::new();
+        event_null.insert("Field".to_string(), "null".to_string());
+        assert!(matcher.matches(&event_null));
+
+        // Non-null string should not match
+        let mut event_val = HashMap::new();
+        event_val.insert("Field".to_string(), "something".to_string());
+        assert!(!matcher.matches(&event_val));
+    }
+
+    // ─── Numeric pattern type mismatches ─────────────────────────────────────
+
+    #[test]
+    fn test_matcher_int_pattern_non_parseable_string() {
+        // A string that cannot be parsed as int should not match an int pattern
+        let yaml = r#"
+title: Int Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Count: 42
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Non-numeric string should not match
+        let mut event = HashMap::new();
+        event.insert("Count".to_string(), "not-a-number".to_string());
+        assert!(!matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_matcher_float_pattern_non_parseable_string() {
+        // A string that cannot be parsed as float should not match a float pattern
+        let yaml = r#"
+title: Float Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Score: 3.14
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Non-numeric string should not match
+        let mut event = HashMap::new();
+        event.insert("Score".to_string(), "not-a-float".to_string());
+        assert!(!matcher.matches(&event));
+
+        // Correct float string should match
+        let mut event2 = HashMap::new();
+        event2.insert("Score".to_string(), "3.14".to_string());
+        assert!(matcher.matches(&event2));
+    }
+
+    // ─── Invalid regex (cached error) ────────────────────────────────────────
+
+    #[test]
+    fn test_matcher_invalid_regex_no_match() {
+        let yaml = r#"
+title: Regex Rule
+logsource:
+    product: test
+detection:
+    selection:
+        Field|re: '[invalid'
+    condition: selection
+"#;
+        let collection = SigmaCollection::from_yaml(yaml).unwrap();
+        let rule = match &collection.documents[0] {
+            SigmaDocument::Rule(r) => r.clone(),
+            _ => panic!("Expected rule"),
+        };
+        let matcher = SigmaRuleMatcher::new(rule).unwrap();
+
+        // Invalid regex should never match; calling twice exercises the cache path
+        let mut event = HashMap::new();
+        event.insert("Field".to_string(), "anything".to_string());
+        assert!(!matcher.matches(&event));
+        assert!(!matcher.matches(&event));
+    }
 }
 

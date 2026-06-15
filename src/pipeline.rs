@@ -2445,5 +2445,70 @@ transformations:
             assert_eq!(maps[0][0].field.as_deref(), Some("s.EventID"));
         }
     }
-    
+
+    // ─── RuleCondition: product/service mismatch ─────────────────────────────
+
+    #[test]
+    fn test_rule_condition_product_mismatch_skips_transformation() {
+        // The rule has product=windows, the condition requires product=linux
+        // → transformation should NOT be applied
+        let yaml = r#"
+name: Test
+transformations:
+  - id: pfx
+    type: field_name_prefix
+    prefix: "pfx."
+    rule_conditions:
+      - type: logsource
+        product: linux
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule();
+        pipeline.apply(&mut rule).unwrap();
+        // Rule product is windows, condition requires linux → prefix NOT applied
+        if let SearchIdentifier::Map(items) = &rule.detection.search_identifiers["selection"] {
+            assert_eq!(items[0].field.as_deref(), Some("EventID"));
+        }
+    }
+
+    #[test]
+    fn test_rule_condition_service_mismatch_skips_transformation() {
+        // The rule has no service, the condition requires service=sysmon
+        // → transformation should NOT be applied (service is None, not "sysmon")
+        let yaml = r#"
+name: Test
+transformations:
+  - id: pfx
+    type: field_name_prefix
+    prefix: "pfx."
+    rule_conditions:
+      - type: logsource
+        service: sysmon
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule(); // service = None
+        pipeline.apply(&mut rule).unwrap();
+        // Rule has no service → transformation NOT applied
+        if let SearchIdentifier::Map(items) = &rule.detection.search_identifiers["selection"] {
+            assert_eq!(items[0].field.as_deref(), Some("EventID"));
+        }
+    }
+
+    // ─── replace_string with invalid regex ────────────────────────────────────
+
+    #[test]
+    fn test_replace_string_invalid_regex_error() {
+        let yaml = r#"
+name: Test
+transformations:
+  - id: bad_regex
+    type: replace_string
+    regex: "[invalid"
+    replacement: "x"
+"#;
+        let pipeline = ProcessingPipeline::from_yaml(yaml).unwrap();
+        let mut rule = create_test_rule();
+        let result = pipeline.apply(&mut rule);
+        assert!(result.is_err());
+    }
 }
