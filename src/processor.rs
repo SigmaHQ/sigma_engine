@@ -51,6 +51,7 @@
 //!     match result {
 //!         DetectionResult::Rule(d) => println!("Matched: {}", d.rule.title),
 //!         DetectionResult::Correlation(cd) => println!("Correlation: {}", cd.rule.title),
+//!         DetectionResult::Unmatched(event) => println!("Unmatched: {}", event.raw.as_deref().unwrap_or("<no raw>")),
 //!     }
 //! }
 //! ```
@@ -354,6 +355,9 @@ pub enum DetectionResult {
     Rule(Detection),
     /// A Sigma correlation rule's condition was satisfied.
     Correlation(CorrelationDetection),
+    /// An event did not match any Sigma rule and was forwarded because
+    /// `ProcessorConfig::keep_unmatched_events` is enabled.
+    Unmatched(LogEvent),
 }
 
 /// Configuration for the log processor.
@@ -365,6 +369,11 @@ pub struct ProcessorConfig {
     pub event_buffer_size: usize,
     /// Size of the detection output channel buffer (0 = unbounded)
     pub detection_buffer_size: usize,
+    /// Whether to forward events that do not match any Sigma rule.
+    ///
+    /// When `false` (default), unmatched events are silently dropped before they reach
+    /// the output channel. When `true`, they are emitted as [`DetectionResult::Unmatched`].
+    pub keep_unmatched_events: bool,
     /// Maximum age (in seconds) of an event relative to the newest event seen
     /// before it is treated as a late-arriving event and discarded from the
     /// correlation time window.  Defaults to 3600 (one hour).
@@ -378,6 +387,7 @@ impl Default for ProcessorConfig {
             num_threads: if num_cpus > 1 { num_cpus - 1 } else { 1 },
             event_buffer_size: 1000,
             detection_buffer_size: 1000,
+            keep_unmatched_events: false,
             late_event_threshold_secs: 3600,
         }
     }
@@ -511,10 +521,18 @@ impl LogProcessor {
         for _ in 0..self.config.num_threads {
             let event_rx_clone = event_rx.clone();
             let raw_detection_tx_clone = raw_detection_tx.clone();
+            let output_tx_clone = output_tx.clone();
             let matchers = self.matchers.clone();
+            let keep_unmatched_events = self.config.keep_unmatched_events;
 
             thread::spawn(move || {
-                Self::worker_thread(event_rx_clone, raw_detection_tx_clone, matchers);
+                Self::worker_thread(
+                    event_rx_clone,
+                    raw_detection_tx_clone,
+                    output_tx_clone,
+                    matchers,
+                    keep_unmatched_events,
+                );
             });
         }
 
@@ -546,13 +564,18 @@ impl LogProcessor {
     fn worker_thread(
         event_rx: Receiver<LogEvent>,
         detection_tx: Sender<Detection>,
+        output_tx: Sender<DetectionResult>,
         matchers: Vec<Arc<SigmaRuleMatcher>>,
+        keep_unmatched_events: bool,
     ) {
         while let Ok(event) = event_rx.recv() {
+            let mut matched = false;
+
             for matcher in &matchers {
                 if Self::log_source_matches(event.log_source.as_ref(), &matcher.rule.logsource)
                     && matcher.matches(&event.data)
                 {
+                    matched = true;
                     let detection = Detection {
                         rule: matcher.rule.clone(),
                         event: event.clone(),
@@ -561,6 +584,12 @@ impl LogProcessor {
                     if detection_tx.send(detection).is_err() {
                         return;
                     }
+                }
+            }
+
+            if keep_unmatched_events && !matched {
+                if output_tx.send(DetectionResult::Unmatched(event.clone())).is_err() {
+                    return;
                 }
             }
         }
@@ -1211,6 +1240,52 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_processor_can_forward_unmatched_events() {
+        let yaml = r#"
+title: Windows Process Creation
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        EventID: 4688
+    condition: selection
+"#;
+        let collection = crate::SigmaCollection::from_yaml(yaml).unwrap();
+        let processor = LogProcessor::from_collection_with_config(
+            &collection,
+            ProcessorConfig {
+                keep_unmatched_events: true,
+                ..ProcessorConfig::default()
+            },
+        )
+        .unwrap();
+        let (event_tx, detection_rx) = processor.start();
+
+        let event = LogEvent::from_fields(
+            LogSource {
+                category: Some("process_creation".to_string()),
+                product: Some("linux".to_string()),
+                service: None,
+            },
+            HashMap::from([("EventID".to_string(), "9999".to_string())]),
+        );
+
+        event_tx.send(event.clone()).unwrap();
+        drop(event_tx);
+
+        let results: Vec<_> = detection_rx.iter().collect();
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            DetectionResult::Unmatched(unmatched) => {
+                assert_eq!(unmatched.data.get("EventID"), Some(&"9999".to_string()));
+            }
+            _ => panic!("expected unmatched event result"),
+        }
+    }
+
+    #[test]
     fn test_log_source_matching() {
         let rule_source = LogSource {
             category: Some("process_creation".to_string()),
@@ -1498,6 +1573,7 @@ detection:
             num_threads: 1,
             event_buffer_size: 0,
             detection_buffer_size: 0,
+            keep_unmatched_events: false,
             late_event_threshold_secs: 3600,
         };
 
@@ -1710,6 +1786,7 @@ correlation:
                     assert_eq!(cd.rule.title, "Correlation Rule");
                     assert!(!cd.contributing_events.is_empty());
                 }
+                DetectionResult::Unmatched(_) => panic!("unexpected unmatched event"),
             }
         }
         assert_eq!(rule_hits, 3);
@@ -2228,6 +2305,7 @@ correlation:
             num_threads: 1,
             event_buffer_size: 100,
             detection_buffer_size: 100,
+            keep_unmatched_events: false,
             // Only allow events up to 60 seconds old relative to latest
             late_event_threshold_secs: 60,
         };
