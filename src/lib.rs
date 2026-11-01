@@ -130,6 +130,7 @@
 //!     match result {
 //!         DetectionResult::Rule(detection) => println!("Rule matched: {}", detection.rule.title),
 //!         DetectionResult::Correlation(cd) => println!("Correlation triggered: {}", cd.rule.title),
+//!         DetectionResult::Unmatched(event) => println!("Unmatched event: {}", event.raw.as_deref().unwrap_or("<no raw>")),
 //!     }
 //! }
 //! ```
